@@ -1,0 +1,32 @@
+job:
+  name: binance_spot_btc_depth20
+
+venue: binance
+market: spot
+
+symbol: BTCUSDT
+depth: 20
+interval_ms: 100
+
+ws:
+  base_url: wss://stream.binance.com:9443/ws
+  open_timeout_sec: 10
+  recv_timeout_sec: 30
+  ping_interval_sec: 20
+  ping_timeout_sec: 20
+  close_timeout_sec: 5
+  max_queue: 256
+  reconnect:
+    initial_backoff_sec: 0.5
+    max_backoff_sec: 10.0
+
+output:
+  root: ./data
+  roll: hourly
+  compression: gzip
+  checksum: sha256
+  flush_every_rows: 5000
+
+validation:
+  require_cross_free: true
+  require_monotonic_levels: true

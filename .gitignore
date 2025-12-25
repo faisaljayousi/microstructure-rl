@@ -1,0 +1,82 @@
+# ==========================================
+# 🐍 Python & C-Extensions
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.env
+.venv/
+pip-log.txt
+*.egg-info/
+.installed.cfg
+*.egg
+.ruff_cache/
+
+# ==========================================
+# 🛠 C++ & CMake Build System
+# ==========================================
+# Ignore the entire build artifact directory
+build/
+cmake-build-debug/
+cmake-build-release/
+CMakeFiles/
+CMakeCache.txt
+*.cmake
+Makefile
+
+# Compiled Object & Library files
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+
+# Executables
+*.exe
+*.out
+*.app
+/cpp/bin/
+
+# ==========================================
+# 📊 HFT Data & Large Blobs (CRITICAL)
+# ==========================================
+# Do NOT version control raw or processed tick data
+data/raw/
+data/processed/
+*.bin
+*.csv
+*.tsv
+*.zip
+*.gz
+*.tar.gz
+*.parquet
+*.h5
+
+# ==========================================
+# 🧠 Machine Learning & Models
+# ==========================================
+# Exclude heavy model weights and training logs
+models/
+*.pkl
+*.pt
+*.pth
+*.onnx
+*.npy
+*.npz
+events.out.tfevents.*
+
+# ==========================================
+# ⚙️ IDEs & Environment
+# ==========================================
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
