@@ -1,30 +1,30 @@
-// converter.cpp
-//
-// Production-grade CSV.GZ -> mmappable .snap converter for L2 snapshot records.
-//
-// Key properties:
-// - Streams gzip input (zlib) without materialising to disk
-// - Robust line reading (no fixed-buffer truncation)
-// - Header-driven column mapping (doesn't rely on positional assumptions)
-// - Deterministic fixed-point conversion (fast_float, overflow/NaN checks)
-// - Fills missing levels with schema sentinel values
-// - Crash-safe output (writes .part then atomic rename)
-// - Two-phase header finalise (record_count updated at end)
-// - Basic integrity checks (file size vs record count)
-//
-// Dependencies:
-// - zlib
-// - fast_float (recommended; add via vcpkg: "fast-float")
-//
-// Build usage (example):
-//   csv_gz_to_snap <input.csv.gz> <output.snap>
-//
-// Notes:
-// - Assumes input CSV columns include:
-//     ts_event_ms, ts_recv_ns, bid_p1, bid_q1, ... bid_p20, bid_q20, ask_p1, ask_q1, ... ask_p20, ask_q20
-// - ts_event_ms may be empty; written as 0 in the output record.
+/*
+CSV.GZ -> mmappable .snap converter for L2 snapshot records.
 
-#include "schema.hpp"  // expects md::l2::{FileHeader,Record,Level,kDepth,kPriceScale,kQtyScale,kBidNullPriceQ,kAskNullPriceQ,kNullQtyQ,kMagic,kVersion,kEndianCheck}
+Key properties:
+- Streams gzip input (zlib) without materialising to disk
+- Robust line reading (no fixed-buffer truncation)
+- Header-driven column mapping (doesn't rely on positional assumptions)
+- Deterministic fixed-point conversion (fast_float, overflow/NaN checks)
+- Fills missing levels with schema sentinel values
+- Crash-safe output (writes .part then atomic rename)
+- Two-phase header finalise (record_count updated at end)
+- Basic integrity checks (file size vs record count)
+
+Dependencies:
+- zlib
+- fast_float (recommended; add via vcpkg: "fast-float")
+
+Build usage (example):
+  csv_gz_to_snap <input.csv.gz> <output.snap>
+
+Notes:
+- Assumes input CSV columns include:
+    ts_event_ms, ts_recv_ns, bid_p1, bid_q1, ... bid_p20, bid_q20, ask_p1, ask_q1, ... ask_p20, ask_q20
+- ts_event_ms may be empty; written as 0 in the output record.
+*/
+
+#include "schema.hpp" 
 #include <zlib.h>
 
 #include <fast_float/fast_float.h>
@@ -42,6 +42,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
+
 
 namespace fs = std::filesystem;
 
