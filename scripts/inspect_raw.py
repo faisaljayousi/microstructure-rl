@@ -6,8 +6,8 @@ def check_raw_integrity(file_path, expected_cols=82):
     """
     Verifies the structural integrity of a gzipped CSV containing LOB data.
 
-    This function ensures that the number of features matches the expected 
-    input shape of the RL environment. It checks for common issues like 
+    This function ensures that the number of features matches the expected
+    input shape of the RL environment. It checks for common issues like
     corrupted files or schema changes.
 
     Args:

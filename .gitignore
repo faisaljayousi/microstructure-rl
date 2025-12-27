@@ -27,6 +27,7 @@ CMakeFiles/
 CMakeCache.txt
 *.cmake
 Makefile
+vcpkg_installed/
 
 # Compiled Object & Library files
 *.o
