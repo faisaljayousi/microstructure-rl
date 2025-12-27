@@ -1,0 +1,28 @@
+# =============================================================================
+# L2 Snapshot Ingestion Configuration
+# =============================================================================
+
+exchange: binance
+feed: ws_depth20
+
+pipeline:
+  # per-file conversion settings
+  timeout_seconds: 1200
+  max_retries: 2
+  skip_existing: true
+
+  # parallelism 
+  max_parallel_workers: 4
+
+layout:
+  # relative under DATA_RAW_ROOT
+  # expects raw_root/exchange/feed/symbol/date/*.csv.gz
+  raw: "{exchange}/{feed}/{symbol}/{date}"
+
+  # relative under DATA_PROCESSED_ROOT
+  processed: "{date}"
+
+logging:
+  # relative under repo root
+  # logs written to: <repo>/logs/ingest/<symbol>/<date>/<input_file_stem>.log
+  dir: "logs/ingest"
