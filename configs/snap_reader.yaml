@@ -1,0 +1,8 @@
+data_root: data
+processed_root: processed
+venue: binance
+dataset: l2_snap
+version: v1
+depth: 20
+symbol: BTCUSDT
+layout: partitioned
