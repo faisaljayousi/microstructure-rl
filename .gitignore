@@ -17,7 +17,7 @@ pip-log.txt
 .ruff_cache/
 
 # ==========================================
-# 🛠 C++ & CMake Build System
+# C++ & CMake Build System
 # ==========================================
 # Ignore the entire build artifact directory
 build/
@@ -45,7 +45,7 @@ vcpkg_installed/
 /cpp/bin/
 
 # ==========================================
-# 📊 HFT Data & Large Blobs (CRITICAL)
+# HFT Data & Large Blobs (CRITICAL)
 # ==========================================
 # Do NOT version control raw or processed tick data
 data/raw/
@@ -58,9 +58,10 @@ data/processed/
 *.tar.gz
 *.parquet
 *.h5
+logs/
 
 # ==========================================
-# 🧠 Machine Learning & Models
+# Machine Learning & Models
 # ==========================================
 # Exclude heavy model weights and training logs
 models/
