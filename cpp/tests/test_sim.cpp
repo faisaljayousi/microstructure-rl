@@ -195,10 +195,10 @@ int main()
   }
 
   // ----------------------------
-  // Phase 2 queue semantics
+  // Queue semantics
   // ----------------------------
 
-  // Test A: Activation “join the tail” when price exists
+  // Activation "join the tail" when price exists
   {
     sim::SimulatorParams p2 = p;
     p2.max_orders = 8;
@@ -234,7 +234,7 @@ int main()
     assert(o.last_level_idx == 1);
   }
 
-  // Test B: Activation “you are the queue” when within-range but missing price
+  // Activation "you are the queue" when within-range but missing price
   {
     sim::SimulatorParams p2 = p;
     p2.max_orders = 8;
@@ -269,7 +269,7 @@ int main()
     assert(o.qty_ahead_q == 0);
   }
 
-  // Test C: Blind if outside top-N range (better than best bid)
+  // Blind if outside top-N range (better than best bid)
   {
     sim::SimulatorParams p2 = p;
     p2.max_orders = 8;
@@ -302,7 +302,7 @@ int main()
     assert(o.qty_ahead_q == 0);
   }
 
-  // Test D: Depletion update uses alpha + min-depletion rule
+  // Depletion update uses alpha + min-depletion rule
   {
     sim::SimulatorParams p2 = p;
     p2.max_orders = 8;
@@ -340,7 +340,7 @@ int main()
     assert(o1.qty_ahead_q == 39);
   }
 
-  // Test E: Visible -> Frozen when level disappears from top-N
+  // Visible -> Frozen when level disappears from top-N
   {
     sim::SimulatorParams p2 = p;
     p2.max_orders = 8;
@@ -375,7 +375,7 @@ int main()
     assert(o.visibility == sim::Visibility::Frozen);
   }
 
-  // Test F: Frozen -> Visible re-anchor pessimistically
+  // Frozen -> Visible re-anchor pessimistically
   {
     sim::SimulatorParams p2 = p;
     p2.max_orders = 8;
@@ -418,7 +418,7 @@ int main()
     assert(o.last_level_idx == 1);
   }
 
-  // Test G: Trade-through sets qty_ahead_q = 0 (no fill yet)
+  // Trade-through sets qty_ahead_q = 0 (no fill yet)
   {
     sim::SimulatorParams p2 = p;
     p2.max_orders = 8;
@@ -452,7 +452,7 @@ int main()
     const sim::Order& o = ex.orders().back();
     assert(o.id == idb);
     assert(o.qty_ahead_q == 0);
-    assert(o.state == sim::OrderState::Active); // Phase 2: no fills yet
+    assert(o.state == sim::OrderState::Active);
   }
 
   return 0;
