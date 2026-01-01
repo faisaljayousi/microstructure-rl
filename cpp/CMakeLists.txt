@@ -43,7 +43,11 @@ target_link_libraries(converter PRIVATE
 )
 
 if(MSVC)
-    target_compile_options(converter PRIVATE /W4 /O2 /permissive- /EHsc)
+    target_compile_options(converter PRIVATE /W4 /permissive- /EHsc)
+    target_compile_options(converter PRIVATE
+        $<$<CONFIG:Release>:/O2>
+        $<$<CONFIG:RelWithDebInfo>:/O2>
+    )
 endif()
 
 # =========================
@@ -63,5 +67,48 @@ target_link_libraries(bench_replay PRIVATE
 )
 
 if(MSVC)
-    target_compile_options(bench_replay PRIVATE /W4 /O2 /permissive- /EHsc)
+    target_compile_options(bench_replay PRIVATE /W4 /permissive- /EHsc)
+    target_compile_options(bench_replay PRIVATE
+        $<$<CONFIG:Release>:/O2>
+        $<$<CONFIG:RelWithDebInfo>:/O2>
+    )
 endif()
+
+# =========================
+# Simulator
+# =========================
+add_library(sim md/sim.cpp)
+target_link_libraries(sim PUBLIC replay)
+target_include_directories(sim PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+
+# =========================
+# Tests (phase-1 invariants)
+# =========================
+enable_testing()
+
+add_executable(test_sim_invariants
+    tests/test_sim.cpp
+)
+
+target_include_directories(test_sim_invariants PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(test_sim_invariants PRIVATE
+    sim
+)
+
+
+if(MSVC)
+  target_compile_options(test_sim_invariants PRIVATE /W4 /permissive- /EHsc)
+  target_compile_options(test_sim_invariants PRIVATE
+    $<$<CONFIG:Release>:/O2>
+    $<$<CONFIG:RelWithDebInfo>:/O2>
+    $<$<CONFIG:MinSizeRel>:/O1>
+  )
+else()
+  target_compile_options(test_sim_invariants PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+add_test(NAME sim_invariants COMMAND $<TARGET_FILE:test_sim_invariants>)
