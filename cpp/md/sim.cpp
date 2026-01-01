@@ -3,6 +3,43 @@
 #include <algorithm>
 #include <limits>
 
+#if defined(_MSC_VER)
+#  include <intrin.h>
+#endif
+
+namespace
+{
+
+  inline bool mul_i64_overflow(sim::i64 a, sim::i64 b, sim::i64* out)
+  {
+#if defined(_MSC_VER)
+    // MSVC x64: use builtin 128-bit multiply
+    // Note: _mul128 returns high 64 bits and stores low 64 bits in *out_low.
+    __int64 high = 0;
+    __int64 low = 0;
+    low = _mul128(static_cast<__int64>(a), static_cast<__int64>(b), &high);
+
+    // If high is not sign-extension of low's sign bit, overflow occurred
+    const bool neg = (low < 0);
+    const __int64 expected_high = neg ? -1 : 0;
+    if ( high != expected_high )
+      return true;
+
+    *out = static_cast<sim::i64>(low);
+    return false;
+#else
+    __int128 prod = static_cast<__int128>(a) * static_cast<__int128>(b);
+    if ( prod > static_cast<__int128>(std::numeric_limits<sim::i64>::max()) )
+      return true;
+    if ( prod < static_cast<__int128>(std::numeric_limits<sim::i64>::min()) )
+      return true;
+    *out = static_cast<sim::i64>(prod);
+    return false;
+#endif
+  }
+
+} // namespace
+
 namespace sim
 {
 
@@ -331,13 +368,12 @@ namespace sim
       return RejectReason::InvalidParams;
 
     if ( side == Side::Buy ) {
-      const __int128 prod = static_cast<__int128>(price_q) * static_cast<__int128>(qty_q);
-      if ( prod < 0 )
+      i64 required = 0;
+      if ( mul_i64_overflow(price_q, qty_q, &required) )
         return RejectReason::InvalidParams;
-      if ( prod > static_cast<__int128>(std::numeric_limits<i64>::max()) )
+      if ( required < 0 )
         return RejectReason::InvalidParams;
 
-      const i64 required = static_cast<i64>(prod);
       if ( ledger_.cash_q - ledger_.locked_cash_q < required )
         return RejectReason::InsufficientFunds;
 
@@ -377,9 +413,16 @@ namespace sim
       return;
 
     if ( o.side == Side::Buy ) {
-      const __int128 prod = static_cast<__int128>(o.price_q) * static_cast<__int128>(remaining);
-      // Safe by construction (risk check), but keep defensive clamp.
-      ledger_.locked_cash_q -= static_cast<i64>(prod);
+      i64 delta = 0;
+      if ( mul_i64_overflow(o.price_q, remaining, &delta) ) {
+        // Should never happen if lock used same arithmetic
+        ledger_.locked_cash_q = 0;
+      }
+      else {
+        ledger_.locked_cash_q -= delta;
+        if ( ledger_.locked_cash_q < 0 )
+          ledger_.locked_cash_q = 0;
+      }
       if ( ledger_.locked_cash_q < 0 )
         ledger_.locked_cash_q = 0;
     }
