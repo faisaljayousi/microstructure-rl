@@ -6,29 +6,31 @@
 
 #include "schema.hpp"
 
-namespace md::l2 {
+namespace md::l2
+{
 
-/**
- * ReplayKernel
- * -------------
- * A zero-copy, sequential replay engine over memory-mapped L2 snapshot files.
- *
- * Design goals:
- * - Treat the dataset as a contiguous stream of fixed-size Records.
- * - Perform no allocations and no Record copies.
- * - Expose raw pointers so the CPU only loads what is actually accessed.
- * - Keep the hot path branch-free except for end-of-stream checks.
- *
- * Lifetime:
- * - ReplayKernel owns the memory mapping.
- * - Pointers returned by next()/data()/begin()/end() remain valid
- *   until the ReplayKernel is destroyed.
- *
- * Threading:
- * - Intended usage is single-threaded replay in simulators/benchmarks.
- */
-class ReplayKernel final {
-public:
+  /**
+   * ReplayKernel
+   * -------------
+   * A zero-copy, sequential replay engine over memory-mapped L2 snapshot files.
+   *
+   * Design goals:
+   * - Treat the dataset as a contiguous stream of fixed-size Records.
+   * - Perform no allocations and no Record copies.
+   * - Expose raw pointers so the CPU only loads what is actually accessed.
+   * - Keep the hot path branch-free except for end-of-stream checks.
+   *
+   * Lifetime:
+   * - ReplayKernel owns the memory mapping.
+   * - Pointers returned by next()/data()/begin()/end() remain valid
+   *   until the ReplayKernel is destroyed.
+   *
+   * Threading:
+   * - Intended usage is single-threaded replay in simulators/benchmarks.
+   */
+  class ReplayKernel final
+  {
+  public:
     /**
      * Construct a replay kernel by memory-mapping a `.snap` file.
      *
@@ -106,17 +108,15 @@ public:
      * Access a record by index without advancing the cursor.
      * No bounds checking (caller responsibility).
      */
-    const Record& operator[](std::size_t idx) const noexcept {
-        return data_[idx];
-    }
+    const Record& operator[](std::size_t idx) const noexcept { return data_[idx]; }
 
-private:
+  private:
     // ---- Memory-mapped region ----
-    const Record*  data_ = nullptr;   // start of records
-    std::size_t    size_ = 0;         // number of records
-    std::size_t    pos_  = 0;         // replay cursor
+    const Record* data_ = nullptr; // start of records
+    std::size_t size_ = 0;         // number of records
+    std::size_t pos_ = 0;          // replay cursor
 
-    void* view_ = nullptr;  // base address returned by MapViewOfFile
+    void* view_ = nullptr; // base address returned by MapViewOfFile
 
     // ---- Platform-specific state ----
     void* file_handle_ = nullptr;
@@ -125,6 +125,6 @@ private:
     // ---- Helpers ----
     void map_file_(const std::string& path);
     void unmap_file_() noexcept;
-};
+  };
 
 } // namespace md::l2

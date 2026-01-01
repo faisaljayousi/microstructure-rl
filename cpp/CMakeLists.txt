@@ -77,7 +77,12 @@ endif()
 # =========================
 # Simulator
 # =========================
-add_library(sim md/sim.cpp)
+add_library(sim 
+    md/sim.cpp
+    md/sim_stp.cpp
+    md/sim_orders.cpp
+    md/sim_activate_set.cpp
+)
 target_link_libraries(sim PUBLIC replay)
 target_include_directories(sim PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
