@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <limits>
 
+#include "sim_lookup.hpp"
+#include "sim_queue.hpp"
+
 #if defined(_MSC_VER)
 #  include <intrin.h>
 #endif
@@ -106,8 +109,6 @@ namespace sim
   void MarketSimulator::step(const md::l2::Record& rec)
   {
     market_ = &rec;
-
-    SIM_ASSERT(rec.ts_recv_ns >= 0);
     now_ = Ns{static_cast<u64>(rec.ts_recv_ns)};
 
     while ( !pending_.empty() && pending_.top().activate_ts <= now_ ) {
@@ -137,6 +138,8 @@ namespace sim
 
       o.state = OrderState::Active;
 
+      sim::queue::init_on_activate(*market_, o);
+
       const u64 oid = o.id;
 
       if ( o.side == Side::Buy ) {
@@ -156,6 +159,11 @@ namespace sim
         best_active_ask_q_ = active_ask_price_counts_.begin()->first;
       }
     }
+
+    for ( u64 idx : active_bids_ )
+      sim::queue::update_one(*market_, params_, orders_[idx]);
+    for ( u64 idx : active_asks_ )
+      sim::queue::update_one(*market_, params_, orders_[idx]);
 
     market_ = nullptr;
   }
