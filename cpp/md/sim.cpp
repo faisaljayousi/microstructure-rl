@@ -40,8 +40,8 @@ namespace sim
     active_bids_.reserve(params_.max_orders);
     active_asks_.reserve(params_.max_orders);
 
-    active_bid_price_counts_.clear();
-    active_ask_price_counts_.clear();
+    bid_buckets_.clear();
+    ask_buckets_.clear();
 
     has_active_bids_ = false;
     has_active_asks_ = false;
@@ -92,24 +92,59 @@ namespace sim
         active_bid_pos_[oid] = static_cast<u64>(active_bids_.size());
         active_bids_.push_back(idx);
 
-        ++active_bid_price_counts_[o.price_q];
-        has_active_bids_ = true;
-        best_active_bid_q_ = active_bid_price_counts_.rbegin()->first;
+        // insert into per-price bucket (O(1) amortized, O(log P) map)
+        auto& v = bid_buckets_[o.price_q];
+        o.pos_in_bucket = static_cast<u64>(v.size());
+        v.push_back(idx);
+
+        // maintain hot-path STP summaries without map iterator access
+        if ( !has_active_bids_ ) {
+          has_active_bids_ = true;
+          best_active_bid_q_ = o.price_q;
+        } else if ( o.price_q > best_active_bid_q_ ) {
+          best_active_bid_q_ = o.price_q;
+        }
       }
       else {
         active_ask_pos_[oid] = static_cast<u64>(active_asks_.size());
         active_asks_.push_back(idx);
 
-        ++active_ask_price_counts_[o.price_q];
-        has_active_asks_ = true;
-        best_active_ask_q_ = active_ask_price_counts_.begin()->first;
+        auto& v = ask_buckets_[o.price_q];
+        o.pos_in_bucket = static_cast<u64>(v.size());
+        v.push_back(idx);
+
+        if ( !has_active_asks_ ) {
+          has_active_asks_ = true;
+          best_active_ask_q_ = o.price_q;
+        } else if ( o.price_q < best_active_ask_q_ ) {
+          best_active_ask_q_ = o.price_q;
+        }
       }
     }
 
-    for ( u64 idx : active_bids_ )
-      sim::queue::update_one(*market_, params_, orders_[idx]);
-    for ( u64 idx : active_asks_ )
-      sim::queue::update_one(*market_, params_, orders_[idx]);
+    // Per-price queue updates: one lookup per active price level
+    const i64 best_bid = rec.bids[0].price_q;
+    const i64 best_ask = rec.asks[0].price_q;
+
+    // Bids: best->worse (descending prices)
+    for ( auto it = bid_buckets_.rbegin(); it != bid_buckets_.rend(); ++it ) {
+      const i64 price_q = it->first;
+      const auto lvl = sim::lookup::bid_level(rec, price_q);
+      const auto& bucket = it->second;
+      for ( const u64 oidx : bucket ) {
+        sim::queue::update_one_cached(params_, lvl, best_bid, best_ask, orders_[oidx]);
+      }
+    }
+
+    // Asks: best->worse (ascending prices)
+    for ( auto it = ask_buckets_.begin(); it != ask_buckets_.end(); ++it ) {
+      const i64 price_q = it->first;
+      const auto lvl = sim::lookup::ask_level(rec, price_q);
+      const auto& bucket = it->second;
+      for ( const u64 oidx : bucket ) {
+        sim::queue::update_one_cached(params_, lvl, best_bid, best_ask, orders_[oidx]);
+      }
+    }
 
     market_ = nullptr;
   }

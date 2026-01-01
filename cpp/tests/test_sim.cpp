@@ -455,5 +455,181 @@ int main()
     assert(o.state == sim::OrderState::Active);
   }
 
+
+  // ----------------------------
+  // STP invariants (CancelResting)
+  // ----------------------------
+  {
+    sim::SimulatorParams p0 = p;
+    p0.max_orders = 16;
+    p0.max_events = 256;
+    p0.outbound_latency = sim::Ns{0};
+    p0.stp = sim::StpPolicy::CancelResting;
+
+    sim::MarketSimulator ex(p0);
+    sim::Ledger l{};
+    l.cash_q = 1'000'000;
+    l.position_qty_q = 1'000'000;
+    ex.reset(sim::Ns{0}, l);
+
+    auto r0 = make_record_ns(0);
+    ex.step(r0);
+
+    // Resting asks at 101 and 103
+    sim::LimitOrderRequest ask1{};
+    ask1.side = sim::Side::Sell;
+    ask1.price_q = 101;
+    ask1.qty_q = 10;
+    const u64 ask_id1 = ex.place_limit(ask1);
+    assert(ask_id1 != 0);
+
+    sim::LimitOrderRequest ask2 = ask1;
+    ask2.price_q = 103;
+    const u64 ask_id2 = ex.place_limit(ask2);
+    assert(ask_id2 != 0);
+
+    ex.step(r0); // activate both asks
+
+    // Incoming buy that crosses only 101 (<=102), not 103.
+    sim::LimitOrderRequest buy{};
+    buy.side = sim::Side::Buy;
+    buy.price_q = 102;
+    buy.qty_q = 10;
+
+    const u64 buy_id = ex.place_limit(buy);
+    assert(buy_id != 0);
+
+    ex.step(r0); // activation attempt -> CancelResting should cancel ask@101 then allow buy to activate
+
+    // ask@101 cancelled
+    const sim::Order& a1 = ex.orders().at(ex.orders().size() - 3); // ask1
+    assert(a1.id == ask_id1);
+    assert(a1.state == sim::OrderState::Cancelled);
+
+    // ask@103 remains active
+    const sim::Order& a2 = ex.orders().at(ex.orders().size() - 2); // ask2
+    assert(a2.id == ask_id2);
+    assert(a2.state == sim::OrderState::Active);
+
+    // incoming buy activates (not rejected)
+    const sim::Order& b = ex.orders().back();
+    assert(b.id == buy_id);
+    assert(b.state == sim::OrderState::Active);
+  }
+
+
+  // ----------------------------
+  // Bucket integrity: 2 orders at same price; cancel one; remaining stays removable
+  // ----------------------------
+  {
+    sim::SimulatorParams p2 = p;
+    p2.max_orders = 8;
+    p2.max_events = 256;
+    p2.outbound_latency = sim::Ns{0};
+
+    sim::MarketSimulator ex(p2);
+    sim::Ledger l{};
+    l.cash_q = 1'000'000;
+    l.position_qty_q = 1'000'000;
+    ex.reset(sim::Ns{0}, l);
+
+    auto r0 = make_record_one_bid_level(0, 100, 10, 99, 40, 101, 10);
+    ex.step(r0);
+
+    sim::LimitOrderRequest b{};
+    b.side = sim::Side::Buy;
+    b.price_q = 99;
+    b.qty_q = 5;
+
+    const u64 id1 = ex.place_limit(b);
+    const u64 id2 = ex.place_limit(b);
+    assert(id1 != 0 && id2 != 0);
+
+    ex.step(r0); // activate both
+
+    // Both are active
+    const sim::Order& o1 = ex.orders().at(ex.orders().size() - 2);
+    const sim::Order& o2 = ex.orders().back();
+    assert(o1.id == id1);
+    assert(o2.id == id2);
+    assert(o1.state == sim::OrderState::Active);
+    assert(o2.state == sim::OrderState::Active);
+
+    // Cancel first; second must remain active and still cancelable
+    assert(ex.cancel(id1));
+    assert(ex.orders().at(ex.orders().size() - 2).state == sim::OrderState::Cancelled);
+
+    // Step to process any pending bookkeeping (if needed by implementation)
+    ex.step(r0);
+
+    // Second still active
+    const sim::Order& o2a = ex.orders().back();
+    assert(o2a.id == id2);
+    assert(o2a.state == sim::OrderState::Active);
+
+    // Cancel second too (must not crash / must succeed)
+    assert(ex.cancel(id2));
+    assert(ex.orders().back().state == sim::OrderState::Cancelled);
+  }
+
+
+  // ----------------------------
+  // Best-price scalar maintenance: removing best bid updates STP detection
+  // ----------------------------
+  {
+    sim::SimulatorParams p2 = p;
+    p2.max_orders = 16;
+    p2.max_events = 256;
+    p2.outbound_latency = sim::Ns{0};
+    p2.stp = sim::StpPolicy::RejectIncoming;
+
+    sim::MarketSimulator ex(p2);
+    sim::Ledger l{};
+    l.cash_q = 1'000'000;
+    l.position_qty_q = 1'000'000;
+    ex.reset(sim::Ns{0}, l);
+
+    auto r0 = make_record_ns(0, 100, 10, 101, 10);
+    ex.step(r0);
+
+    // Resting bids at 100 and 99
+    sim::LimitOrderRequest b1{};
+    b1.side = sim::Side::Buy;
+    b1.price_q = 100;
+    b1.qty_q = 10;
+    const u64 id100 = ex.place_limit(b1);
+    assert(id100 != 0);
+
+    sim::LimitOrderRequest b2 = b1;
+    b2.price_q = 99;
+    const u64 id99 = ex.place_limit(b2);
+    assert(id99 != 0);
+
+    ex.step(r0); // activate both
+
+    // Cancel best bid 100
+    assert(ex.cancel(id100));
+    ex.step(r0); // advance so any best-price maintenance is applied by your implementation
+
+    // Incoming sell at 99 should now self-cross against remaining bid@99 and be rejected.
+    sim::LimitOrderRequest s1{};
+    s1.side = sim::Side::Sell;
+    s1.price_q = 99;
+    s1.qty_q = 1;
+
+    const u64 sell_id = ex.place_limit(s1);
+    assert(sell_id != 0);
+    ex.step(r0); // activate attempt -> STP applies
+
+    const sim::Order& incoming = ex.orders().back();
+    assert(incoming.id == sell_id);
+    assert(incoming.state == sim::OrderState::Rejected);
+
+    // Remaining bid@99 should still be active
+    const sim::Order& remaining = ex.orders().at(1); // second submitted order
+    assert(remaining.id == id99);
+    assert(remaining.state == sim::OrderState::Active);
+  }
+
   return 0;
 }

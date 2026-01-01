@@ -139,7 +139,16 @@ namespace sim::lookup
     }
     const unsigned __int64 eff = lo / divisor;
 #else
-    ...
+    // Exact 128-bit arithmetic on non-MSVC
+    const __int128 prod = static_cast<__int128>(depletion_q) * static_cast<__int128>(alpha_ppm);
+    const __int128 q = prod / static_cast<__int128>(1'000'000);
+    std::uint64_t eff = 0;
+    if ( q <= 0 )
+      eff = 0;
+    else if ( q > static_cast<__int128>(std::numeric_limits<std::uint64_t>::max()) )
+      eff = static_cast<std::uint64_t>(depletion_q); // conservative clamp
+    else
+      eff = static_cast<std::uint64_t>(q);
 #endif
 
     if ( eff == 0 )

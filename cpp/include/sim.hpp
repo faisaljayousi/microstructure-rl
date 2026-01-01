@@ -176,7 +176,7 @@ namespace sim
   };
 
   /// Minimal order object stored in the simulator.
-  struct Order
+  struct alignas(64) Order
   {
     u64 id{0};              // simulator-assigned, dense id
     u64 client_order_id{0}; // metadata only
@@ -209,6 +209,10 @@ namespace sim
 
     OrderState state{OrderState::Pending};
     RejectReason reject_reason{RejectReason::None};
+
+    // --- Active-price bucket metadata (for O(1) removal from per-price vectors) ---
+    // Valid iff order is resting (Active/Partial). Uses std::numeric_limits<u64>::max() as invalid.
+    u64 pos_in_bucket{std::numeric_limits<u64>::max()};
   };
 
   /// Lifecycle/event log entry.
@@ -320,10 +324,11 @@ namespace sim
     std::vector<u64> active_bids_;
     std::vector<u64> active_asks_;
 
-    // Price counts for fast STP best-price maintenance.
-    // bid: best = rbegin()->first (max), ask: best = begin()->first (min)
-    std::map<i64, u64> active_bid_price_counts_;
-    std::map<i64, u64> active_ask_price_counts_;
+    // Price buckets: price_q -> order indices at that price
+    // Bid prices ordered ascending; best bid is rbegin()->first.
+    // Ask prices ordered ascending; best ask is begin()->first.
+    std::map<i64, std::vector<u64>> bid_buckets_;
+    std::map<i64, std::vector<u64>> ask_buckets_;
 
     // Back-pointers for O(1) remove: order_id -> position in active_* vector.
     // Use kInvalidIndex when not active. Size = max_orders + 1.
