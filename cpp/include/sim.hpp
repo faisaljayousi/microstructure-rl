@@ -4,6 +4,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <map>
+#include <optional>
 #include <queue>
 #include <vector>
 
@@ -29,7 +31,6 @@ namespace sim
     constexpr explicit Ns(u64 v) : value(v) {}
 
     friend constexpr Ns operator+(Ns a, Ns b) { return Ns{a.value + b.value}; }
-    friend constexpr Ns operator-(Ns a, Ns b) { return Ns{a.value - b.value}; }
 
     friend constexpr bool operator==(Ns a, Ns b) { return a.value == b.value; }
     friend constexpr bool operator!=(Ns a, Ns b) { return a.value != b.value; }
@@ -229,7 +230,7 @@ namespace sim
   };
 
   /// Simulator:
-  /// - TODO: matching/fills 
+  /// - TODO: matching/fills
   class MarketSimulator final
   {
   public:
@@ -244,8 +245,8 @@ namespace sim
     void step(const md::l2::Record& rec);
 
     // Place orders. Return assigned simulator order_id (0 if rejected).
-    u64 place_limit(const LimitOrderRequest& req);
-    u64 place_market(const MarketOrderRequest& req);
+    [[nodiscard]] u64 place_limit(const LimitOrderRequest& req);
+    [[nodiscard]] u64 place_market(const MarketOrderRequest& req);
 
     // Cancel an existing order by simulator order_id.
     // If the order is still PENDING, cancellation is allowed (releases locks).
@@ -270,8 +271,8 @@ namespace sim
     RejectReason risk_check_and_lock_limit_(Side side, i64 price_q, i64 qty_q);
     RejectReason risk_check_and_lock_market_(Side side, i64 qty_q);
 
-    // Emits an event; if event capacity is exceeded, rejects deterministically.
-    // Returns false if event could not be logged (caller should reject/cancel accordingly).
+    // Attempts to append an event to the log.
+    // Returns false if event capacity is exceeded (caller must reject/cancel deterministically).
     bool push_event_(Ns ts, u64 id, EventType et, OrderState st, RejectReason rr);
 
     void unlock_on_cancel_(const Order& o);
@@ -314,6 +315,32 @@ namespace sim
     std::priority_queue<PendingEntry, std::vector<PendingEntry>, PendingCmp> pending_;
     u64 next_order_id_{1};
     u64 next_seq_{1};
+
+    // Active (resting) orders, stored as indices into orders_.
+    std::vector<u64> active_bids_;
+    std::vector<u64> active_asks_;
+
+    // Price counts for fast STP best-price maintenance.
+    // bid: best = rbegin()->first (max), ask: best = begin()->first (min)
+    std::map<i64, u64> active_bid_price_counts_;
+    std::map<i64, u64> active_ask_price_counts_;
+
+    // Back-pointers for O(1) remove: order_id -> position in active_* vector.
+    // Use kInvalidIndex when not active. Size = max_orders + 1.
+    std::vector<u64> active_bid_pos_;
+    std::vector<u64> active_ask_pos_;
+
+    // Remove an ACTIVE bid/ask order from active sets.
+    // order_id : simulator order id
+    // order_idx: index into orders_
+    void remove_active_bid_(u64 order_id, u64 order_idx);
+    void remove_active_ask_(u64 order_id, u64 order_idx);
+
+    // Fast STP detection summaries
+    bool has_active_bids_{false};
+    bool has_active_asks_{false};
+    i64 best_active_bid_q_{0}; // max price among active bids
+    i64 best_active_ask_q_{0}; // min price among active asks
 
     // Lifecycle/event log. Hard capped by params_.max_events.
     std::vector<Event> events_;
