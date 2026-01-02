@@ -8,6 +8,7 @@ This document specifies the execution semantics of the market simulator. It is i
 	* 2.1. [Input Market Data](#InputMarketData)
 	* 2.2. [Observability Limits](#ObservabilityLimits)
 * 3. [Causality and Look-Ahead Elimination](#CausalityandLook-AheadElimination)
+	* 3.1. [ Step Scheduling (Operational Causality)](#StepSchedulingOperationalCausality)
 * 4. [Order Types Supported](#OrderTypesSupported)
 * 5. [Order Lifecycle](#OrderLifecycle)
 * 6. [Queueing & Priority Model](#QueueingPriorityModel)
@@ -15,13 +16,19 @@ This document specifies the execution semantics of the market simulator. It is i
 	* 6.2. [Queue Depletion Inference](#QueueDepletionInference)
 * 7. [Fill Rules](#FillRules)
 	* 7.1. [Cross-Through Fills (Aggressive)](#Cross-ThroughFillsAggressive)
+		* 7.1.1. [Execution Price and Sweep Semantics](#ExecutionPriceandSweepSemantics)
+		* 7.1.2. [Fill Event Logging for Sweeps (Slippage Observability)](#FillEventLoggingforSweepsSlippageObservability)
 	* 7.2. [At-Touch Passive Fills](#At-TouchPassiveFills)
+		* 7.2.1. [Effective Depletion Minimum](#EffectiveDepletionMinimum)
+		* 7.2.2. [Deterministic Allocation at a Price Level](#DeterministicAllocationataPriceLevel)
 	* 7.3. [Vanishing Liquidity Rule](#VanishingLiquidityRule)
 * 8. [Out-of-Band (Deep Book) Orders](#Out-of-BandDeepBookOrders)
 * 9. [Self-Trade Prevention (STP)](#Self-TradePreventionSTP)
 * 10. [Accounting & Fees](#AccountingFees)
 	* 10.1. [Fixed-Point Accounting](#Fixed-PointAccounting)
+		* 10.1.1. [Notional and Normalisation](#NotionalandNormalisation)
 	* 10.2. [Fees](#Fees)
+		* 10.2.1. [Fee Computation and Attribution](#FeeComputationandAttribution)
 * 11. [Determinism & Reproducibility](#DeterminismReproducibility)
 
 <!-- vscode-markdown-toc-config
@@ -65,7 +72,17 @@ The simulator enforces strict causal ordering:
 
 - Agent actions cannot result in fills at the same observed market timestamp.
 - All orders become active only after a modelled outbound latency.
-- Market observations presented to the agent may be delayed by an **observation latency**.
+- Market observations presented to the agent may be delayed by an observation latency.
+
+###  3.1. <a name='StepSchedulingOperationalCausality'></a> Step Scheduling (Operational Causality)
+
+To make the "no same-tick fills" rule mechanically enforceable, each `step(snapshot t)` is ordered as:
+
+1. **Queue update**: update `qty_ahead` / visibility state using the transition from snapshot `t-1` to `t`.
+2. **Matching & fills**: evaluate fills only for orders that were `ACTIVE` strictly before snapshot `t` (i.e., became active during a prior `step()` call).
+3. **Activation**: pop newly due orders from the outbound-latency heap and transition them from `PENDING` to `ACTIVE`.
+
+Newly activated orders are not fill-eligible until the next `step()`.
 
 ---
 
@@ -133,6 +150,29 @@ An order is filled immediately if:
 
 Execution price is defined explicitly (e.g. best opposing price at match time).
 
+####  7.1.1. <a name='ExecutionPriceandSweepSemantics'></a>Execution Price and Sweep Semantics
+
+When an order is marketable, it executes as an aggressive sweep of visible opposing depth (top-N levels only).
+
+- Limit (marketable) orders sweep level-by-level, best price outward, until:
+  1) the order is fully filled, or
+  2) the next opposing level price violates the limit, or
+  3) visible depth is exhausted.
+
+  Each partial fill is priced at the consumed level's displayed price.
+
+
+####  7.1.2. <a name='FillEventLoggingforSweepsSlippageObservability'></a>Fill Event Logging for Sweeps (Slippage Observability)
+
+Aggressive sweeps are decomposed into discrete events per price level to provide high-fidelity feedback for RL agent training.
+
+* If a sweep consumes multiple book levels, the simulator generates one FillEvent for each unique price/quantity pair hit. 
+* While a Weighted Average Price (WAP) may be calculated for reporting, the raw per-level events remain the primary source of truth for the ledger.
+
+This logging requirement allows for precise calculation of Realised Slippage (the difference between the best-observed price and the actual execution price across the sweep).
+ 
+
+
 ###  7.2. <a name='At-TouchPassiveFills'></a>At-Touch Passive Fills
 
 A passive fill at price `p` is allowed only if:
@@ -142,6 +182,21 @@ A passive fill at price `p` is allowed only if:
 
 Fills occur only after `qty_ahead` reaches zero and only up to the remaining effective depletion.
 
+####  7.2.1. <a name='EffectiveDepletionMinimum'></a>Effective Depletion Minimum
+
+To prevent an agent's queue position from stalling indefinitely, the simulator enforces a minimum depletion floor. If any liquidity is removed from a price level ($\text{depletion}\_q > 0$), the effective_depletion is guaranteed to be at least 1 unit. This ensures that even in low-volume or low-$\alpha$ regimes, integer truncation cannot result in "immortal" queue positions.
+
+####  7.2.2. <a name='DeterministicAllocationataPriceLevel'></a>Deterministic Allocation at a Price Level
+
+Let `E_p` be the effective depletion available at price `p` in the current step. Passive fills at price `p` are allocated deterministically across eligible agent orders at `p`:
+
+1. Eligible orders are processed in activation order (approx FIFO), tie-broken by increasing `order_id`.
+2. For each order in that order:
+   - `fill_qty = min(remaining_qty, E_p_remaining)`
+   - decrement `E_p_remaining` by `fill_qty`
+3. Stop when `E_p_remaining == 0`.
+
+All passive fills are classified as **MAKER** fills for fee purposes.
 
 ###  7.3. <a name='VanishingLiquidityRule'></a>Vanishing Liquidity Rule
 
@@ -184,6 +239,14 @@ STP checks are deterministic and respect the modelled outbound latency. An order
 - Prices, quantities, cash, and inventory are maintained in fixed-point `int64`
 - Floating point is used only for reporting and reward computation
 
+####  10.1.1. <a name='NotionalandNormalisation'></a>Notional and Normalisation
+
+For a fill of `qty_q` at `price_q`, the cash notional in `cash_q` units is:
+
+    notional_cash_q = floor((price_q * qty_q) / PRICE_SCALE)
+
+All intermediate products MUST use 128-bit integer arithmetic to avoid overflow.
+
 ###  10.2. <a name='Fees'></a>Fees
 
 - Maker and taker fees are explicitly defined
@@ -191,6 +254,20 @@ STP checks are deterministic and respect the modelled outbound latency. An order
 - All PnL and rewards are net of fees
 
 Fee schedules are configurable but fixed for a given run.
+
+####  10.2.1. <a name='FeeComputationandAttribution'></a>Fee Computation and Attribution
+
+For a fill with `notional_cash_q`:
+
+    fee_cash_q = floor((notional_cash_q * fee_ppm) / PPM_SCALE)
+
+Fee attribution is determined by the fill mechanism:
+- **TAKER**: any fill produced by aggressive sweep matching (Cross-Through fills, including market orders).
+- **MAKER**: any fill produced by passive at-touch queue depletion.
+
+Fees are applied atomically with the fill and immediately reflected in available balances.
+
+
 
 ---
 

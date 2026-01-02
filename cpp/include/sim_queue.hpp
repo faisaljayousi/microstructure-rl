@@ -63,7 +63,7 @@ namespace sim::queue
     }
   }
 
-   // Cached version: caller provides the LevelLookup for the bucket price,
+  // Cached version: caller provides the LevelLookup for the bucket price,
   // and best bid/ask for this tick (computed once per step).
   inline void update_one_cached(
       const SimulatorParams& params,
@@ -90,7 +90,8 @@ namespace sim::queue
           o.last_level_idx = m.idx;
           o.last_level_qty_q = m.qty_q;
           o.qty_ahead_q = m.qty_q; // pessimistic re-anchor
-        } else {
+        }
+        else {
           const i64 prev = o.last_level_qty_q;
           const i64 nowq = m.qty_q;
           const i64 depl = (prev > nowq) ? (prev - nowq) : 0;
@@ -110,12 +111,14 @@ namespace sim::queue
           o.last_level_idx = -1;
           o.last_level_qty_q = 0;
           o.qty_ahead_q = 0;
-        } else if ( o.visibility == Visibility::Visible && o.last_level_idx >= 0 ) {
+        }
+        else if ( o.visibility == Visibility::Visible && o.last_level_idx >= 0 ) {
           o.visibility = Visibility::Frozen;
           o.last_level_idx = -1;
           o.last_level_qty_q = 0;
         }
-      } else {
+      }
+      else {
         if ( o.visibility == Visibility::Visible ) {
           o.visibility = Visibility::Frozen;
           o.last_level_idx = -1;
@@ -137,7 +140,8 @@ namespace sim::queue
         o.last_level_idx = m.idx;
         o.last_level_qty_q = m.qty_q;
         o.qty_ahead_q = m.qty_q;
-      } else {
+      }
+      else {
         const i64 prev = o.last_level_qty_q;
         const i64 nowq = m.qty_q;
         const i64 depl = (prev > nowq) ? (prev - nowq) : 0;
@@ -156,12 +160,14 @@ namespace sim::queue
         o.last_level_idx = -1;
         o.last_level_qty_q = 0;
         o.qty_ahead_q = 0;
-      } else if ( o.visibility == Visibility::Visible && o.last_level_idx >= 0 ) {
+      }
+      else if ( o.visibility == Visibility::Visible && o.last_level_idx >= 0 ) {
         o.visibility = Visibility::Frozen;
         o.last_level_idx = -1;
         o.last_level_qty_q = 0;
       }
-    } else {
+    }
+    else {
       if ( o.visibility == Visibility::Visible ) {
         o.visibility = Visibility::Frozen;
         o.last_level_idx = -1;
@@ -169,7 +175,6 @@ namespace sim::queue
       }
     }
   }
-
 
   // Updates queue/visibility state for one ACTIVE order (Phase 2: no fills).
   inline void
@@ -182,8 +187,10 @@ namespace sim::queue
 
     const i64 best_bid = rec.bids[0].price_q;
     const i64 best_ask = rec.asks[0].price_q;
-    const auto m = (o.side == Side::Buy) ? lookup::bid_level(rec, o.price_q)
-                                         : lookup::ask_level(rec, o.price_q);
+    const auto m =
+        (o.side == Side::Buy)
+            ? lookup::bid_level(rec, o.price_q)
+            : lookup::ask_level(rec, o.price_q);
     update_one_cached(params, m, best_bid, best_ask, o);
   }
 } // namespace sim::queue
