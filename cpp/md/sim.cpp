@@ -40,13 +40,15 @@ namespace sim
     active_bids_.reserve(params_.max_orders);
     active_asks_.reserve(params_.max_orders);
 
+    bid_prices_.clear();
+    ask_prices_.clear();
     bid_buckets_.clear();
     ask_buckets_.clear();
 
-    has_active_bids_ = false;
-    has_active_asks_ = false;
-    best_active_bid_q_ = 0;
-    best_active_ask_q_ = 0;
+    // has_active_bids_ = false;
+    // has_active_asks_ = false;
+    // best_active_bid_q_ = 0;
+    // best_active_ask_q_ = 0;
 
     SIM_ASSERT(ledger_.locked_cash_q >= 0);
     SIM_ASSERT(ledger_.locked_position_qty_q >= 0);
@@ -93,15 +95,15 @@ namespace sim
         active_bids_.push_back(idx);
 
         // insert into per-price bucket (O(1) amortized, O(log P) map)
-        auto& v = bid_buckets_[o.price_q];
-        o.pos_in_bucket = static_cast<u64>(v.size());
-        v.push_back(idx);
+        const u64 bidx = get_or_insert_bid_bucket_idx_(o.price_q);
+        bucket_push_back_bid_(bidx, idx);
 
         // maintain hot-path STP summaries without map iterator access
         if ( !has_active_bids_ ) {
           has_active_bids_ = true;
           best_active_bid_q_ = o.price_q;
-        } else if ( o.price_q > best_active_bid_q_ ) {
+        }
+        else if ( o.price_q > best_active_bid_q_ ) {
           best_active_bid_q_ = o.price_q;
         }
       }
@@ -109,14 +111,14 @@ namespace sim
         active_ask_pos_[oid] = static_cast<u64>(active_asks_.size());
         active_asks_.push_back(idx);
 
-        auto& v = ask_buckets_[o.price_q];
-        o.pos_in_bucket = static_cast<u64>(v.size());
-        v.push_back(idx);
+        const u64 aidx = get_or_insert_ask_bucket_idx_(o.price_q);
+        bucket_push_back_ask_(aidx, idx);
 
         if ( !has_active_asks_ ) {
           has_active_asks_ = true;
           best_active_ask_q_ = o.price_q;
-        } else if ( o.price_q < best_active_ask_q_ ) {
+        }
+        else if ( o.price_q < best_active_ask_q_ ) {
           best_active_ask_q_ = o.price_q;
         }
       }
@@ -127,26 +129,28 @@ namespace sim
     const i64 best_ask = rec.asks[0].price_q;
 
     // Bids: best->worse (descending prices)
-    for ( auto it = bid_buckets_.rbegin(); it != bid_buckets_.rend(); ++it ) {
-      const i64 price_q = it->first;
+    for ( u64 i = static_cast<u64>(bid_prices_.size()); i-- > 0; ) {
+      const i64 price_q = bid_prices_[i];
       const auto lvl = sim::lookup::bid_level(rec, price_q);
-      const auto& bucket = it->second;
-      for ( const u64 oidx : bucket ) {
-        sim::queue::update_one_cached(params_, lvl, best_bid, best_ask, orders_[oidx]);
+      for ( u64 cur = bid_buckets_[i].head; cur != kInvalidIndex; ) {
+        const u64 next = orders_[cur].bucket_next; // safe for removal during iteration later
+        sim::queue::update_one_cached(params_, lvl, best_bid, best_ask, orders_[cur]);
+        cur = next;
       }
-    }
 
-    // Asks: best->worse (ascending prices)
-    for ( auto it = ask_buckets_.begin(); it != ask_buckets_.end(); ++it ) {
-      const i64 price_q = it->first;
-      const auto lvl = sim::lookup::ask_level(rec, price_q);
-      const auto& bucket = it->second;
-      for ( const u64 oidx : bucket ) {
-        sim::queue::update_one_cached(params_, lvl, best_bid, best_ask, orders_[oidx]);
+      // Asks: best->worse (ascending prices)
+      for ( u64 i = 0; i < static_cast<u64>(ask_prices_.size()); ++i ) {
+        const i64 price_q = ask_prices_[i];
+        const auto lvl = sim::lookup::ask_level(rec, price_q);
+        for ( u64 cur = ask_buckets_[i].head; cur != kInvalidIndex; ) {
+          const u64 next = orders_[cur].bucket_next;
+          sim::queue::update_one_cached(params_, lvl, best_bid, best_ask, orders_[cur]);
+          cur = next;
+        }
       }
-    }
 
-    market_ = nullptr;
+      market_ = nullptr;
+    }
   }
 
   bool MarketSimulator::push_event_(Ns ts, u64 id, EventType et, OrderState st, RejectReason rr)

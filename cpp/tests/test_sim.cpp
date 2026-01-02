@@ -455,7 +455,6 @@ int main()
     assert(o.state == sim::OrderState::Active);
   }
 
-
   // ----------------------------
   // STP invariants (CancelResting)
   // ----------------------------
@@ -499,7 +498,8 @@ int main()
     const u64 buy_id = ex.place_limit(buy);
     assert(buy_id != 0);
 
-    ex.step(r0); // activation attempt -> CancelResting should cancel ask@101 then allow buy to activate
+    ex.step(
+        r0); // activation attempt -> CancelResting should cancel ask@101 then allow buy to activate
 
     // ask@101 cancelled
     const sim::Order& a1 = ex.orders().at(ex.orders().size() - 3); // ask1
@@ -516,7 +516,6 @@ int main()
     assert(b.id == buy_id);
     assert(b.state == sim::OrderState::Active);
   }
-
 
   // ----------------------------
   // Bucket integrity: 2 orders at same price; cancel one; remaining stays removable
@@ -559,7 +558,7 @@ int main()
     assert(ex.cancel(id1));
     assert(ex.orders().at(ex.orders().size() - 2).state == sim::OrderState::Cancelled);
 
-    // Step to process any pending bookkeeping (if needed by implementation)
+    // Step to process any pending bookkeeping
     ex.step(r0);
 
     // Second still active
@@ -567,11 +566,10 @@ int main()
     assert(o2a.id == id2);
     assert(o2a.state == sim::OrderState::Active);
 
-    // Cancel second too (must not crash / must succeed)
+    // Cancel second too (must succeed)
     assert(ex.cancel(id2));
     assert(ex.orders().back().state == sim::OrderState::Cancelled);
   }
-
 
   // ----------------------------
   // Best-price scalar maintenance: removing best bid updates STP detection
@@ -629,6 +627,92 @@ int main()
     const sim::Order& remaining = ex.orders().at(1); // second submitted order
     assert(remaining.id == id99);
     assert(remaining.state == sim::OrderState::Active);
+  }
+
+  // ----------------------------
+  // FIFO bucket integrity: cancel head then tail (same price)
+  // ----------------------------
+  {
+    sim::SimulatorParams p2 = p;
+    p2.max_orders = 16;
+    p2.max_events = 256;
+    p2.outbound_latency = sim::Ns{0};
+
+    sim::MarketSimulator ex(p2);
+    sim::Ledger l{};
+    l.cash_q = 1'000'000;
+    l.position_qty_q = 1'000'000;
+    ex.reset(sim::Ns{0}, l);
+
+    auto r0 = make_record_ns(0, /*best_bid*/ 100, /*bid_qty*/ 10, /*best_ask*/ 101, /*ask_qty*/ 10);
+    ex.step(r0);
+
+    sim::LimitOrderRequest b{};
+    b.side = sim::Side::Buy;
+    b.price_q = 99;
+    b.qty_q = 1;
+
+    const u64 id1 = ex.place_limit(b);
+    const u64 id2 = ex.place_limit(b);
+    assert(id1 != 0 && id2 != 0);
+
+    ex.step(r0); // activate both, they should be in FIFO order at price 99
+
+    // Cancel first (head). Must succeed.
+    assert(ex.cancel(id1));
+    ex.step(r0);
+
+    // Cancel second (now head). Must still succeed and not crash.
+    assert(ex.cancel(id2));
+    ex.step(r0);
+
+    // Both orders terminal cancelled
+    const auto& o1 = ex.orders().at(ex.orders().size() - 2);
+    const auto& o2 = ex.orders().back();
+    assert(o1.id == id1 && o2.id == id2);
+    assert(o1.state == sim::OrderState::Cancelled);
+    assert(o2.state == sim::OrderState::Cancelled);
+  }
+
+  // ----------------------------
+  // FIFO bucket integrity: cancel middle of 3 (same price)
+  // ----------------------------
+  {
+    sim::SimulatorParams p2 = p;
+    p2.max_orders = 32;
+    p2.max_events = 256;
+    p2.outbound_latency = sim::Ns{0};
+
+    sim::MarketSimulator ex(p2);
+    sim::Ledger l{};
+    l.cash_q = 1'000'000;
+    l.position_qty_q = 1'000'000;
+    ex.reset(sim::Ns{0}, l);
+
+    auto r0 = make_record_ns(0, 100, 10, 101, 10);
+    ex.step(r0);
+
+    sim::LimitOrderRequest b{};
+    b.side = sim::Side::Buy;
+    b.price_q = 99;
+    b.qty_q = 1;
+
+    const u64 id1 = ex.place_limit(b);
+    const u64 id2 = ex.place_limit(b);
+    const u64 id3 = ex.place_limit(b);
+    assert(id1 && id2 && id3);
+
+    ex.step(r0); // activate all 3
+
+    // Cancel middle
+    assert(ex.cancel(id2));
+    ex.step(r0);
+
+    // Remaining two still cancelable (proves list is still connected)
+    assert(ex.cancel(id1));
+    ex.step(r0);
+    assert(ex.cancel(id3));
+    ex.step(r0);
   }
 
   return 0;

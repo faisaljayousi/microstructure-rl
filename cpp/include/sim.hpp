@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <limits>
 #include <map>
+#include <memory> // std::unique_ptr
+#include <memory_resource>
 #include <optional>
 #include <queue>
 #include <vector>
@@ -22,6 +24,9 @@ namespace sim
   /// used by md::l2 (see md::l2::FileHeader::price_scale / qty_scale).
   using i64 = std::int64_t;
   using u64 = std::uint64_t;
+  using u32 = std::uint32_t;
+
+  inline constexpr u64 kInvalidIndex = std::numeric_limits<u64>::max();
 
   /// Strongly-typed nanoseconds for clarity.
   struct Ns
@@ -210,9 +215,10 @@ namespace sim
     OrderState state{OrderState::Pending};
     RejectReason reject_reason{RejectReason::None};
 
-    // --- Active-price bucket metadata (for O(1) removal from per-price vectors) ---
-    // Valid iff order is resting (Active/Partial). Uses std::numeric_limits<u64>::max() as invalid.
-    u64 pos_in_bucket{std::numeric_limits<u64>::max()};
+    // Intrusive per-price FIFO list pointers (indices into orders_)
+    // Valid iff order is ACTIVE/PARTIAL and resting in a bucket.
+    u64 bucket_prev{kInvalidIndex};
+    u64 bucket_next{kInvalidIndex};
   };
 
   /// Lifecycle/event log entry.
@@ -266,8 +272,6 @@ namespace sim
     const std::vector<Event>& events() const { return events_; }
 
   private:
-    static constexpr u64 kInvalidIndex = std::numeric_limits<u64>::max();
-
     // --- Internal helpers ---
     RejectReason validate_limit_(const LimitOrderRequest& req) const;
     RejectReason validate_market_(const MarketOrderRequest& req) const;
@@ -324,11 +328,20 @@ namespace sim
     std::vector<u64> active_bids_;
     std::vector<u64> active_asks_;
 
-    // Price buckets: price_q -> order indices at that price
+    struct Bucket
+    {
+      u64 head{kInvalidIndex};
+      u64 tail{kInvalidIndex};
+      u32 size{0};
+    };
+
+    // Flat ordered buckets (aligned arrays)
     // Bid prices ordered ascending; best bid is rbegin()->first.
     // Ask prices ordered ascending; best ask is begin()->first.
-    std::map<i64, std::vector<u64>> bid_buckets_;
-    std::map<i64, std::vector<u64>> ask_buckets_;
+    std::vector<i64> bid_prices_; // sorted ascending
+    std::vector<Bucket> bid_buckets_;
+    std::vector<i64> ask_prices_; // sorted ascending
+    std::vector<Bucket> ask_buckets_;
 
     // Back-pointers for O(1) remove: order_id -> position in active_* vector.
     // Use kInvalidIndex when not active. Size = max_orders + 1.
@@ -349,6 +362,19 @@ namespace sim
 
     // Lifecycle/event log. Hard capped by params_.max_events.
     std::vector<Event> events_;
+
+    // Price-bucket helpers (log P lookup, contiguous iteration)
+    u64 find_bid_bucket_idx_(i64 price_q) const;
+    u64 find_ask_bucket_idx_(i64 price_q) const;
+    u64 get_or_insert_bid_bucket_idx_(i64 price_q);
+    u64 get_or_insert_ask_bucket_idx_(i64 price_q);
+    void erase_bid_bucket_if_empty_(u64 bidx);
+    void erase_ask_bucket_if_empty_(u64 bidx);
+
+    void bucket_push_back_bid_(u64 bidx, u64 order_idx);
+    void bucket_push_back_ask_(u64 aidx, u64 order_idx);
+    void bucket_erase_bid_(u64 bidx, u64 order_idx);
+    void bucket_erase_ask_(u64 aidx, u64 order_idx);
   };
 
 } // namespace sim
