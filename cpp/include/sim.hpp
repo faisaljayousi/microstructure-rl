@@ -333,6 +333,9 @@ namespace sim
       u64 head{kInvalidIndex};
       u64 tail{kInvalidIndex};
       u32 size{0};
+      i64 last_level_qty_q{0};
+      std::int16_t last_level_idx{-1};
+      Visibility visibility{Visibility::Blind};
     };
 
     // Flat ordered buckets (aligned arrays)
@@ -375,6 +378,13 @@ namespace sim
     void bucket_push_back_ask_(u64 aidx, u64 order_idx);
     void bucket_erase_bid_(u64 bidx, u64 order_idx);
     void bucket_erase_ask_(u64 aidx, u64 order_idx);
+
+    // Passive at-touch fills with per-level depletion accounting (FIFO)
+    void apply_passive_fills_one_bucket_(
+        const md::l2::Record& rec,
+        i64 bucket_price_q,
+        Bucket& bucket,
+        Side side);
   };
 
 } // namespace sim

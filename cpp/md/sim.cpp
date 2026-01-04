@@ -45,11 +45,6 @@ namespace sim
     bid_buckets_.clear();
     ask_buckets_.clear();
 
-    // has_active_bids_ = false;
-    // has_active_asks_ = false;
-    // best_active_bid_q_ = 0;
-    // best_active_ask_q_ = 0;
-
     SIM_ASSERT(ledger_.locked_cash_q >= 0);
     SIM_ASSERT(ledger_.locked_position_qty_q >= 0);
   }
@@ -59,6 +54,48 @@ namespace sim
     market_ = &rec;
     now_ = Ns{static_cast<u64>(rec.ts_recv_ns)};
 
+    // ------------------------------------------------------------
+    // (1) Queue update for ALREADY-ACTIVE resting orders (t-1 -> t)
+    // ------------------------------------------------------------
+    const i64 best_bid = rec.bids[0].price_q;
+    const i64 best_ask = rec.asks[0].price_q;
+
+    // Bids: best->worse (descending prices)
+    for ( u64 i = static_cast<u64>(bid_prices_.size()); i-- > 0; ) {
+      const i64 price_q = bid_prices_[i];
+      const auto lvl = sim::lookup::bid_level(rec, price_q);
+      for ( u64 cur = bid_buckets_[i].head; cur != kInvalidIndex; ) {
+        const u64 next = orders_[cur].bucket_next; // safe for removal during iteration later
+        sim::queue::update_one_cached(params_, lvl, best_bid, best_ask, orders_[cur]);
+        cur = next;
+      }
+    }
+
+    // Asks: best->worse (ascending prices)
+    for ( u64 i = 0; i < static_cast<u64>(ask_prices_.size()); ++i ) {
+      const i64 price_q = ask_prices_[i];
+      const auto lvl = sim::lookup::ask_level(rec, price_q);
+      for ( u64 cur = ask_buckets_[i].head; cur != kInvalidIndex; ) {
+        const u64 next = orders_[cur].bucket_next; // safe for removal during iteration later
+        sim::queue::update_one_cached(params_, lvl, best_bid, best_ask, orders_[cur]);
+        cur = next;
+      }
+    }
+
+    // ------------------------------------------------------------
+    // (2) Match & fill ONLY orders that were active before this step
+    //     (implement in Phase 3; keep activation after this)
+    // ------------------------------------------------------------
+    for ( u64 i = 0; i < bid_buckets_.size(); ++i ) {
+      apply_passive_fills_one_bucket_(rec, bid_prices_[i], bid_buckets_[i], Side::Buy);
+    }
+    for ( u64 i = 0; i < ask_buckets_.size(); ++i ) {
+      apply_passive_fills_one_bucket_(rec, ask_prices_[i], ask_buckets_[i], Side::Sell);
+    }
+
+    // ------------------------------------------------------------
+    // (3) Activate newly-due orders (NOT fill-eligible until next step)
+    // ------------------------------------------------------------
     while ( !pending_.empty() && pending_.top().activate_ts <= now_ ) {
       const PendingEntry e = pending_.top();
       pending_.pop();
@@ -86,6 +123,7 @@ namespace sim
 
       o.state = OrderState::Active;
 
+      // The order becomes fill-eligible only on the next step
       sim::queue::init_on_activate(*market_, o);
 
       const u64 oid = o.id;
@@ -94,11 +132,9 @@ namespace sim
         active_bid_pos_[oid] = static_cast<u64>(active_bids_.size());
         active_bids_.push_back(idx);
 
-        // insert into per-price bucket (O(1) amortized, O(log P) map)
         const u64 bidx = get_or_insert_bid_bucket_idx_(o.price_q);
         bucket_push_back_bid_(bidx, idx);
 
-        // maintain hot-path STP summaries without map iterator access
         if ( !has_active_bids_ ) {
           has_active_bids_ = true;
           best_active_bid_q_ = o.price_q;
@@ -124,33 +160,7 @@ namespace sim
       }
     }
 
-    // Per-price queue updates: one lookup per active price level
-    const i64 best_bid = rec.bids[0].price_q;
-    const i64 best_ask = rec.asks[0].price_q;
-
-    // Bids: best->worse (descending prices)
-    for ( u64 i = static_cast<u64>(bid_prices_.size()); i-- > 0; ) {
-      const i64 price_q = bid_prices_[i];
-      const auto lvl = sim::lookup::bid_level(rec, price_q);
-      for ( u64 cur = bid_buckets_[i].head; cur != kInvalidIndex; ) {
-        const u64 next = orders_[cur].bucket_next; // safe for removal during iteration later
-        sim::queue::update_one_cached(params_, lvl, best_bid, best_ask, orders_[cur]);
-        cur = next;
-      }
-
-      // Asks: best->worse (ascending prices)
-      for ( u64 i = 0; i < static_cast<u64>(ask_prices_.size()); ++i ) {
-        const i64 price_q = ask_prices_[i];
-        const auto lvl = sim::lookup::ask_level(rec, price_q);
-        for ( u64 cur = ask_buckets_[i].head; cur != kInvalidIndex; ) {
-          const u64 next = orders_[cur].bucket_next;
-          sim::queue::update_one_cached(params_, lvl, best_bid, best_ask, orders_[cur]);
-          cur = next;
-        }
-      }
-
-      market_ = nullptr;
-    }
+    market_ = nullptr;
   }
 
   bool MarketSimulator::push_event_(Ns ts, u64 id, EventType et, OrderState st, RejectReason rr)
