@@ -149,6 +149,150 @@ int main()
   }
 
   // ----------------------------
+  // Passive fills
+  // ----------------------------
+
+  // 1) Activation ordering: newly-activated orders are NOT fill-eligible until next step.
+  //    If best ask crosses and depletion happens on the activation step, filled_qty must remain 0.
+  {
+    sim::SimulatorParams p2 = p;
+    p2.max_orders = 8;
+    p2.max_events = 256;
+    p2.outbound_latency = sim::Ns{0};
+    p2.alpha_ppm = 1'000'000; // make depletion deterministic
+
+    sim::MarketSimulator ex(p2);
+    sim::Ledger l{};
+    l.cash_q = 1'000'000;
+    l.position_qty_q = 1'000'000;
+    ex.reset(sim::Ns{0}, l);
+
+    // Initial book: bid@100 qty10, bid@99 qty40, ask@101 qty10
+    auto r0 = make_record_one_bid_level(0, 100, 10, 99, 40, 101, 10);
+    ex.step(r0);
+    sim::LimitOrderRequest bid{};
+    bid.side = sim::Side::Buy;
+    bid.price_q = 99;
+    bid.qty_q = 5;
+
+    const u64 idb = ex.place_limit(bid);
+    assert(idb != 0);
+
+    // On this step, best ask crosses down to 99 AND bid@99 depletes by 3 (40->37).
+    // If activation happened before fills, order could fill immediately; contract forbids it.
+    auto r1 = make_record_one_bid_level(1, 100, 10, 99, 37, 99, 10);
+    ex.step(r1); // activation occurs at end; passive fills run before activation
+
+    const sim::Order& o1 = ex.orders().back();
+    assert(o1.id == idb);
+    assert(o1.state == sim::OrderState::Active);
+    assert(o1.filled_qty_q == 0);
+
+    // Next step: further depletion at 99 should now be fill-eligible.
+    auto r2 = make_record_one_bid_level(2, 100, 10, 99, 34, 99, 10); // 37->34 => Ep=3
+    ex.step(r2);
+
+    const sim::Order& o2 = ex.orders().back();
+    assert(o2.id == idb);
+    assert(o2.filled_qty_q > 0); // filled by passive depletion once eligible
+    assert(o2.state == sim::OrderState::Partial || o2.state == sim::OrderState::Filled);
+  }
+
+  // 2) FIFO passive fill allocation at same price after trade-through sets qty_ahead=0.
+  //    Depletion Ep is consumed FIFO: first order fills fully, remainder goes to next.
+  {
+    sim::SimulatorParams p2 = p;
+    p2.max_orders = 16;
+    p2.max_events = 256;
+    p2.outbound_latency = sim::Ns{0};
+    p2.alpha_ppm = 1'000'000;
+
+    sim::MarketSimulator ex(p2);
+    sim::Ledger l{};
+    l.cash_q = 1'000'000;
+    l.position_qty_q = 1'000'000;
+    ex.reset(sim::Ns{0}, l);
+
+    auto r0 = make_record_one_bid_level(0, 100, 10, 99, 40, 101, 10);
+    ex.step(r0);
+
+    sim::LimitOrderRequest b{};
+    b.side = sim::Side::Buy;
+    b.price_q = 99;
+    b.qty_q = 2;
+
+    const u64 id1 = ex.place_limit(b);
+    const u64 id2 = ex.place_limit(b);
+    assert(id1 != 0 && id2 != 0);
+
+    ex.step(r0); // activate both at 99
+
+    // Trade-through signal: best ask crosses to 99 => qty_ahead becomes 0 (no fill yet if no
+    // depletion)
+    auto r1 = make_record_one_bid_level(1, 100, 10, 99, 40, 99, 10);
+    ex.step(r1);
+
+    const sim::Order& a1 = ex.orders().at(ex.orders().size() - 2);
+    const sim::Order& a2 = ex.orders().back();
+    assert(a1.id == id1 && a2.id == id2);
+    assert(a1.qty_ahead_q == 0);
+    assert(a2.qty_ahead_q == 0);
+    assert(a1.filled_qty_q == 0);
+    assert(a2.filled_qty_q == 0);
+
+    // Now deplete bid@99 by 3 => Ep=3. FIFO: id1 fills 2, id2 fills 1.
+    auto r2 = make_record_one_bid_level(2, 100, 10, 99, 37, 99, 10);
+    ex.step(r2);
+
+    const sim::Order& f1 = ex.orders().at(ex.orders().size() - 2);
+    const sim::Order& f2 = ex.orders().back();
+    assert(f1.id == id1 && f2.id == id2);
+    assert(f1.filled_qty_q == 2);
+    assert(f1.state == sim::OrderState::Filled);
+    assert(f2.filled_qty_q == 1);
+    assert(f2.state == sim::OrderState::Partial);
+  }
+
+  // 3) No double depletion across multiple orders at same price:
+  //    A depletion event must not advance BOTH orders' qty_ahead as if each got full Ep.
+  {
+    sim::SimulatorParams p2 = p;
+    p2.max_orders = 16;
+    p2.max_events = 256;
+    p2.outbound_latency = sim::Ns{0};
+    p2.alpha_ppm = 1'000'000;
+
+    sim::MarketSimulator ex(p2);
+    sim::Ledger l{};
+    l.cash_q = 1'000'000;
+    l.position_qty_q = 1'000'000;
+    ex.reset(sim::Ns{0}, l);
+
+    auto r0 = make_record_one_bid_level(0, 100, 10, 99, 40, 101, 10);
+    ex.step(r0);
+
+    sim::LimitOrderRequest b{};
+    b.side = sim::Side::Buy;
+    b.price_q = 99;
+    b.qty_q = 1;
+
+    const u64 id1 = ex.place_limit(b);
+    const u64 id2 = ex.place_limit(b);
+    assert(id1 && id2);
+    ex.step(r0); // activate
+
+    // Deplete 40 -> 30 => Ep=10. FIFO consumption should reduce head by 10, tail unchanged.
+    auto r1 = make_record_one_bid_level(1, 100, 10, 99, 30, 101, 10);
+    ex.step(r1);
+
+    const sim::Order& o1 = ex.orders().at(ex.orders().size() - 2);
+    const sim::Order& o2 = ex.orders().back();
+    assert(o1.id == id1 && o2.id == id2);
+    assert(o1.qty_ahead_q == 30); // 40 - 10
+    assert(o2.qty_ahead_q == 40); // MUST NOT also become 30 (would indicate double depletion)
+  }
+
+  // ----------------------------
   // 3) STP invariants (RejectIncoming)
   // ----------------------------
   {

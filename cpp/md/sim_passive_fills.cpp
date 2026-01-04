@@ -1,3 +1,4 @@
+#include "schema.hpp"
 #include "sim.hpp"
 #include "sim_lookup.hpp"
 
@@ -19,37 +20,88 @@ namespace sim
       Bucket& b,
       const Side side)
   {
+    const i64 best_bid = rec.bids[0].price_q;
+    const i64 best_ask = rec.asks[0].price_q;
+
     // Lookup this bucket price in top-N
     const auto m =
         (side == Side::Buy)
             ? lookup::bid_level(rec, bucket_price_q)
             : lookup::ask_level(rec, bucket_price_q);
 
-    // Visibility state machine (bucket-level analogue of sim::queue::update_one_cached)
+    // ----------------------------
+    // Bucket-level visibility state machine (mirrors update_one_cached behavior)
+    // ----------------------------
     if ( m.found ) {
-      if ( b.visibility != Visibility::Visible || b.last_level_idx < 0 ) {
-        // (Re-)anchor: no depletion computed on first observation
+      if ( b.visibility == Visibility::Frozen || b.visibility == Visibility::Blind ||
+           b.last_level_idx < 0 ) {
         b.visibility = Visibility::Visible;
         b.last_level_idx = m.idx;
         b.last_level_qty_q = m.qty_q;
+
+        // Pessimistic re-anchor for all resting orders at this price:
+        // update_one_cached did this per order on re-visibility
+        // :contentReference[oaicite:4]{index=4}
+        for ( u64 cur = b.head; cur != kInvalidIndex; cur = orders_[cur].bucket_next ) {
+          Order& o = orders_[cur];
+          if ( !is_resting(o.state) || o.type != OrderType::Limit )
+            continue;
+          o.visibility = Visibility::Visible;
+          o.last_level_idx = m.idx;
+          o.last_level_qty_q = m.qty_q;
+          o.qty_ahead_q = m.qty_q;
+        }
+
+        // No depletion inferred on a re-anchor tick.
         return;
       }
     }
     else {
-      // Not found: if within_range => level disappeared inside top-N => Frozen
-      // If outside range => also Frozen if previously Visible.
-      if ( b.visibility == Visibility::Visible ) {
-        b.visibility = Visibility::Frozen;
-        b.last_level_idx = -1;
-        b.last_level_qty_q = 0;
+      // not found
+      if ( m.within_range ) {
+        if ( b.visibility == Visibility::Blind ) {
+          b.visibility = Visibility::Visible;
+          b.last_level_idx = -1;
+          b.last_level_qty_q = 0;
+          // mirror onto orders
+          for ( u64 cur = b.head; cur != kInvalidIndex; cur = orders_[cur].bucket_next ) {
+            Order& o = orders_[cur];
+            if ( !is_resting(o.state) || o.type != OrderType::Limit )
+              continue;
+            o.visibility = Visibility::Visible;
+            o.last_level_idx = -1;
+            o.last_level_qty_q = 0;
+            o.qty_ahead_q = 0;
+          }
+        }
+        else if ( b.visibility == Visibility::Visible && b.last_level_idx >= 0 ) {
+          b.visibility = Visibility::Frozen;
+          b.last_level_idx = -1;
+          b.last_level_qty_q = 0;
+          for ( u64 cur = b.head; cur != kInvalidIndex; cur = orders_[cur].bucket_next ) {
+            Order& o = orders_[cur];
+            if ( !is_resting(o.state) || o.type != OrderType::Limit )
+              continue;
+            o.visibility = Visibility::Frozen;
+            o.last_level_idx = -1;
+            o.last_level_qty_q = 0;
+          }
+        }
       }
-      else if ( b.visibility == Visibility::Blind && m.within_range ) {
-        // Price is within visible range but no exact match => treat as Visible-but-empty
-        // (No passive fills, no queue inference; this matches your existing "within_range but
-        // !found" handling)
-        b.visibility = Visibility::Visible;
-        b.last_level_idx = -1;
-        b.last_level_qty_q = 0;
+      else {
+        if ( b.visibility == Visibility::Visible ) {
+          b.visibility = Visibility::Frozen;
+          b.last_level_idx = -1;
+          b.last_level_qty_q = 0;
+          for ( u64 cur = b.head; cur != kInvalidIndex; cur = orders_[cur].bucket_next ) {
+            Order& o = orders_[cur];
+            if ( !is_resting(o.state) || o.type != OrderType::Limit )
+              continue;
+            o.visibility = Visibility::Frozen;
+            o.last_level_idx = -1;
+            o.last_level_qty_q = 0;
+          }
+        }
       }
       return;
     }
@@ -58,13 +110,14 @@ namespace sim
     if ( b.visibility != Visibility::Visible )
       return;
 
-    // Compute per-level effective depletion E_p (once)
+    // ----------------------------
+    // Bucket-level depletion
+    // ----------------------------
     const i64 prev = b.last_level_qty_q;
     const i64 nowq = m.qty_q;
     const i64 depl = (prev > nowq) ? (prev - nowq) : 0;
     i64 Ep = lookup::effective_depletion(depl, params_.alpha_ppm);
 
-    // Advance bucket state for next tick
     b.last_level_idx = m.idx;
     b.last_level_qty_q = nowq;
 
@@ -84,8 +137,23 @@ namespace sim
         continue;
       }
 
-      // Enforce per-order visibility consistent with bucket visibility
+      // Mirror bucket-level observations for tests/debug.
       o.visibility = b.visibility;
+      o.last_level_idx = b.last_level_idx;
+      o.last_level_qty_q = b.last_level_qty_q;
+
+      // Trade-through signal (Phase 2 semantics preserved): if crossed, queue is irrelevant.
+      // update_one_cached did this per order :contentReference[oaicite:5]{index=5}.
+      if ( side == Side::Buy ) {
+        if ( lookup::is_valid_ask_price(best_ask) && best_ask <= bucket_price_q ) {
+          o.qty_ahead_q = 0;
+        }
+      }
+      else {
+        if ( lookup::is_valid_bid_price(best_bid) && best_bid >= bucket_price_q ) {
+          o.qty_ahead_q = 0;
+        }
+      }
 
       // 1) Consume Ep to move this order forward in the displayed queue
       if ( o.qty_ahead_q > 0 ) {

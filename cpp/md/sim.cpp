@@ -2,6 +2,7 @@
 
 #include <algorithm>
 
+#include "schema.hpp"
 #include "sim_queue.hpp"
 
 namespace sim
@@ -55,36 +56,9 @@ namespace sim
     now_ = Ns{static_cast<u64>(rec.ts_recv_ns)};
 
     // ------------------------------------------------------------
-    // (1) Queue update for ALREADY-ACTIVE resting orders (t-1 -> t)
-    // ------------------------------------------------------------
-    const i64 best_bid = rec.bids[0].price_q;
-    const i64 best_ask = rec.asks[0].price_q;
-
-    // Bids: best->worse (descending prices)
-    for ( u64 i = static_cast<u64>(bid_prices_.size()); i-- > 0; ) {
-      const i64 price_q = bid_prices_[i];
-      const auto lvl = sim::lookup::bid_level(rec, price_q);
-      for ( u64 cur = bid_buckets_[i].head; cur != kInvalidIndex; ) {
-        const u64 next = orders_[cur].bucket_next; // safe for removal during iteration later
-        sim::queue::update_one_cached(params_, lvl, best_bid, best_ask, orders_[cur]);
-        cur = next;
-      }
-    }
-
-    // Asks: best->worse (ascending prices)
-    for ( u64 i = 0; i < static_cast<u64>(ask_prices_.size()); ++i ) {
-      const i64 price_q = ask_prices_[i];
-      const auto lvl = sim::lookup::ask_level(rec, price_q);
-      for ( u64 cur = ask_buckets_[i].head; cur != kInvalidIndex; ) {
-        const u64 next = orders_[cur].bucket_next; // safe for removal during iteration later
-        sim::queue::update_one_cached(params_, lvl, best_bid, best_ask, orders_[cur]);
-        cur = next;
-      }
-    }
-
-    // ------------------------------------------------------------
-    // (2) Match & fill ONLY orders that were active before this step
-    //     (implement in Phase 3; keep activation after this)
+    // (1) Queue + passive fills are handled bucket-level in
+    // apply_passive_fills_one_bucket_(). This is the ONLY place
+    // that applies effective depletion to qty_ahead_q (no double depletion).
     // ------------------------------------------------------------
     for ( u64 i = 0; i < bid_buckets_.size(); ++i ) {
       apply_passive_fills_one_bucket_(rec, bid_prices_[i], bid_buckets_[i], Side::Buy);
@@ -94,7 +68,7 @@ namespace sim
     }
 
     // ------------------------------------------------------------
-    // (3) Activate newly-due orders (NOT fill-eligible until next step)
+    // (2) Activate newly-due orders (NOT fill-eligible until next step)
     // ------------------------------------------------------------
     while ( !pending_.empty() && pending_.top().activate_ts <= now_ ) {
       const PendingEntry e = pending_.top();
