@@ -27,6 +27,9 @@ namespace sim
 
   void MarketSimulator::erase_bid_bucket_if_empty_(u64 bidx)
   {
+    if ( defer_bucket_erase_ )
+      return;
+
     // precondition: bid_buckets_[bidx].size == 0
     const i64 price_q = bid_prices_[bidx];
     bid_prices_.erase(bid_prices_.begin() + bidx);
@@ -64,6 +67,9 @@ namespace sim
 
   void MarketSimulator::erase_ask_bucket_if_empty_(u64 aidx)
   {
+    if ( defer_bucket_erase_ )
+      return;
+
     const i64 price_q = ask_prices_[aidx];
     ask_prices_.erase(ask_prices_.begin() + aidx);
     ask_buckets_.erase(ask_buckets_.begin() + aidx);

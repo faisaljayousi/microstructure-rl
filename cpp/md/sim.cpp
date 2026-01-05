@@ -2,6 +2,7 @@
 
 #include <algorithm>
 
+#include "schema.hpp"
 #include "sim_queue.hpp"
 
 namespace sim
@@ -21,6 +22,7 @@ namespace sim
 
     orders_.clear();
     events_.clear();
+    fills_.clear();
     pending_ = decltype(pending_)();
 
     next_order_id_ = 1;
@@ -45,11 +47,6 @@ namespace sim
     bid_buckets_.clear();
     ask_buckets_.clear();
 
-    // has_active_bids_ = false;
-    // has_active_asks_ = false;
-    // best_active_bid_q_ = 0;
-    // best_active_ask_q_ = 0;
-
     SIM_ASSERT(ledger_.locked_cash_q >= 0);
     SIM_ASSERT(ledger_.locked_position_qty_q >= 0);
   }
@@ -59,93 +56,125 @@ namespace sim
     market_ = &rec;
     now_ = Ns{static_cast<u64>(rec.ts_recv_ns)};
 
-    while ( !pending_.empty() && pending_.top().activate_ts <= now_ ) {
-      const PendingEntry e = pending_.top();
-      pending_.pop();
+    // ------------------------------------------------------------
+    // (1) Queue + passive fills are handled bucket-level in
+    // apply_passive_fills_one_bucket_ may fully fill the last order in a bucket,
+    // which triggers erase_*_bucket_if_empty_() and vector erase of *_prices_/*_buckets_.
+    // Therefore iteration MUST be robust to erases.
+    // ------------------------------------------------------------
+    {
+      // Do not erase bucket vectors while matching/filling (would dangle Bucket&).
+      defer_bucket_erase_ = true;
 
-      if ( e.order_id == 0 || e.order_id >= id_to_index_.size() )
-        continue;
-
-      const u64 idx = id_to_index_[e.order_id];
-      if ( idx == kInvalidIndex )
-        continue;
-
-      Order& o = orders_[idx];
-      if ( o.state != OrderState::Pending )
-        continue;
-
-      if ( !apply_stp_on_activate_(o) )
-        continue;
-
-      if ( !push_event_(now_, o.id, EventType::Activate, OrderState::Active, RejectReason::None) ) {
-        unlock_on_cancel_(o);
-        o.state = OrderState::Rejected;
-        o.reject_reason = RejectReason::InsufficientResources;
-        continue;
+      // (1) Passive fills (erase-robust iteration)
+      for ( u64 i = 0; i < static_cast<u64>(bid_buckets_.size()); ++i ) {
+        apply_passive_fills_one_bucket_(rec, bid_prices_[i], bid_buckets_[i], Side::Buy);
       }
 
-      o.state = OrderState::Active;
-
-      sim::queue::init_on_activate(*market_, o);
-
-      const u64 oid = o.id;
-
-      if ( o.side == Side::Buy ) {
-        active_bid_pos_[oid] = static_cast<u64>(active_bids_.size());
-        active_bids_.push_back(idx);
-
-        // insert into per-price bucket (O(1) amortized, O(log P) map)
-        const u64 bidx = get_or_insert_bid_bucket_idx_(o.price_q);
-        bucket_push_back_bid_(bidx, idx);
-
-        // maintain hot-path STP summaries without map iterator access
-        if ( !has_active_bids_ ) {
-          has_active_bids_ = true;
-          best_active_bid_q_ = o.price_q;
-        }
-        else if ( o.price_q > best_active_bid_q_ ) {
-          best_active_bid_q_ = o.price_q;
-        }
-      }
-      else {
-        active_ask_pos_[oid] = static_cast<u64>(active_asks_.size());
-        active_asks_.push_back(idx);
-
-        const u64 aidx = get_or_insert_ask_bucket_idx_(o.price_q);
-        bucket_push_back_ask_(aidx, idx);
-
-        if ( !has_active_asks_ ) {
-          has_active_asks_ = true;
-          best_active_ask_q_ = o.price_q;
-        }
-        else if ( o.price_q < best_active_ask_q_ ) {
-          best_active_ask_q_ = o.price_q;
-        }
-      }
-    }
-
-    // Per-price queue updates: one lookup per active price level
-    const i64 best_bid = rec.bids[0].price_q;
-    const i64 best_ask = rec.asks[0].price_q;
-
-    // Bids: best->worse (descending prices)
-    for ( u64 i = static_cast<u64>(bid_prices_.size()); i-- > 0; ) {
-      const i64 price_q = bid_prices_[i];
-      const auto lvl = sim::lookup::bid_level(rec, price_q);
-      for ( u64 cur = bid_buckets_[i].head; cur != kInvalidIndex; ) {
-        const u64 next = orders_[cur].bucket_next; // safe for removal during iteration later
-        sim::queue::update_one_cached(params_, lvl, best_bid, best_ask, orders_[cur]);
-        cur = next;
+      for ( u64 i = 0; i < static_cast<u64>(ask_buckets_.size()); ++i ) {
+        apply_passive_fills_one_bucket_(rec, ask_prices_[i], ask_buckets_[i], Side::Sell);
       }
 
-      // Asks: best->worse (ascending prices)
-      for ( u64 i = 0; i < static_cast<u64>(ask_prices_.size()); ++i ) {
-        const i64 price_q = ask_prices_[i];
-        const auto lvl = sim::lookup::ask_level(rec, price_q);
-        for ( u64 cur = ask_buckets_[i].head; cur != kInvalidIndex; ) {
-          const u64 next = orders_[cur].bucket_next;
-          sim::queue::update_one_cached(params_, lvl, best_bid, best_ask, orders_[cur]);
-          cur = next;
+      // (2) Aggressive (taker) fills: marketable bucket heads only, sweep visible depth
+      apply_aggressive_fills_(rec);
+
+      // ------------------------------------------------------------
+      // (3) Activate newly-due orders (NOT fill-eligible until next step)
+      // ------------------------------------------------------------
+      defer_bucket_erase_ = false;
+
+      // Compact empty buckets using existing invariant-preserving erasers.
+      for ( u64 i = static_cast<u64>(bid_buckets_.size()); i-- > 0; ) {
+        if ( bid_buckets_[i].size == 0 && bid_buckets_[i].head == kInvalidIndex )
+          erase_bid_bucket_if_empty_(i);
+      }
+      for ( u64 i = 0; i < static_cast<u64>(ask_buckets_.size()); /*no++*/ ) {
+        if ( ask_buckets_[i].size == 0 && ask_buckets_[i].head == kInvalidIndex ) {
+          erase_ask_bucket_if_empty_(i);
+          continue;
+        }
+        ++i;
+      }
+
+      while ( !pending_.empty() && pending_.top().activate_ts <= now_ ) {
+        const PendingEntry e = pending_.top();
+        pending_.pop();
+
+        if ( e.order_id == 0 || e.order_id >= id_to_index_.size() )
+          continue;
+
+        const u64 idx = id_to_index_[e.order_id];
+        if ( idx == kInvalidIndex )
+          continue;
+
+        Order& o = orders_[idx];
+        if ( o.state != OrderState::Pending )
+          continue;
+
+        if ( !apply_stp_on_activate_(o) )
+          continue;
+
+        if ( !push_event_(
+                 now_,
+                 o.id,
+                 EventType::Activate,
+                 OrderState::Active,
+                 RejectReason::None) ) {
+          unlock_on_cancel_(o);
+          o.state = OrderState::Rejected;
+          o.reject_reason = RejectReason::InsufficientResources;
+          continue;
+        }
+
+        o.state = OrderState::Active;
+
+        // The order becomes fill-eligible only on the next step
+        sim::queue::init_on_activate(*market_, o);
+
+        const u64 oid = o.id;
+
+        if ( o.side == Side::Buy ) {
+          active_bid_pos_[oid] = static_cast<u64>(active_bids_.size());
+          active_bids_.push_back(idx);
+
+          const u64 bidx = get_or_insert_bid_bucket_idx_(o.price_q);
+          // If this price bucket is new/empty, seed bucket-level queue state from the
+          // activation-time snapshot to avoid re-anchoring next step (loses one tick).
+          if ( bid_buckets_[bidx].size == 0 ) {
+            bid_buckets_[bidx].visibility = o.visibility;
+            bid_buckets_[bidx].last_level_idx = o.last_level_idx;
+            bid_buckets_[bidx].last_level_qty_q = o.last_level_qty_q;
+          }
+          bucket_push_back_bid_(bidx, idx);
+
+          if ( !has_active_bids_ ) {
+            has_active_bids_ = true;
+            best_active_bid_q_ = o.price_q;
+          }
+          else if ( o.price_q > best_active_bid_q_ ) {
+            best_active_bid_q_ = o.price_q;
+          }
+        }
+        else {
+          active_ask_pos_[oid] = static_cast<u64>(active_asks_.size());
+          active_asks_.push_back(idx);
+
+          const u64 aidx = get_or_insert_ask_bucket_idx_(o.price_q);
+          // Same seeding for asks.
+          if ( ask_buckets_[aidx].size == 0 ) {
+            ask_buckets_[aidx].visibility = o.visibility;
+            ask_buckets_[aidx].last_level_idx = o.last_level_idx;
+            ask_buckets_[aidx].last_level_qty_q = o.last_level_qty_q;
+          }
+          bucket_push_back_ask_(aidx, idx);
+
+          if ( !has_active_asks_ ) {
+            has_active_asks_ = true;
+            best_active_ask_q_ = o.price_q;
+          }
+          else if ( o.price_q < best_active_ask_q_ ) {
+            best_active_ask_q_ = o.price_q;
+          }
         }
       }
 
@@ -159,6 +188,32 @@ namespace sim
       return false;
     events_.push_back(Event{ts, id, et, st, rr});
     return true;
+  }
+
+  void MarketSimulator::cleanup_empty_buckets_()
+  {
+    // Bids
+    for ( u64 i = 0; i < static_cast<u64>(bid_buckets_.size()); ) {
+      const Bucket& b = bid_buckets_[i];
+      if ( b.size == 0 && b.head == kInvalidIndex ) {
+        // erase price+bucket in lockstep (flat-map parallel vectors)
+        bid_prices_.erase(bid_prices_.begin() + i);
+        bid_buckets_.erase(bid_buckets_.begin() + i);
+        continue;
+      }
+      ++i;
+    }
+
+    // Asks
+    for ( u64 i = 0; i < static_cast<u64>(ask_buckets_.size()); ) {
+      const Bucket& b = ask_buckets_[i];
+      if ( b.size == 0 && b.head == kInvalidIndex ) {
+        ask_prices_.erase(ask_prices_.begin() + i);
+        ask_buckets_.erase(ask_buckets_.begin() + i);
+        continue;
+      }
+      ++i;
+    }
   }
 
 } // namespace sim
