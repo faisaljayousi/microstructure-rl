@@ -22,6 +22,7 @@ namespace sim
 
     orders_.clear();
     events_.clear();
+    fills_.clear();
     pending_ = decltype(pending_)();
 
     next_order_id_ = 1;
@@ -57,19 +58,54 @@ namespace sim
 
     // ------------------------------------------------------------
     // (1) Queue + passive fills are handled bucket-level in
-    // apply_passive_fills_one_bucket_(). This is the ONLY place
-    // that applies effective depletion to qty_ahead_q (no double depletion).
+    // apply_passive_fills_one_bucket_ may fully fill the last order in a bucket,
+    // which triggers erase_*_bucket_if_empty_() and vector erase of *_prices_/*_buckets_.
+    // Therefore iteration MUST be robust to erases.
     // ------------------------------------------------------------
-    for ( u64 i = 0; i < bid_buckets_.size(); ++i ) {
-      apply_passive_fills_one_bucket_(rec, bid_prices_[i], bid_buckets_[i], Side::Buy);
-    }
-    for ( u64 i = 0; i < ask_buckets_.size(); ++i ) {
-      apply_passive_fills_one_bucket_(rec, ask_prices_[i], ask_buckets_[i], Side::Sell);
+    {
+      // Do not erase bucket vectors while matching/filling (would dangle Bucket&).
+      defer_bucket_erase_ = true;
+
+      u64 i = 0;
+      while ( i < static_cast<u64>(bid_buckets_.size()) ) {
+        const i64 price_before = bid_prices_[i];
+        apply_passive_fills_one_bucket_(rec, price_before, bid_buckets_[i], Side::Buy);
+
+        // If the bucket at i still exists and is the same price, advance.
+        // If it was erased, the next bucket shifted into i; do NOT increment.
+        if ( i < static_cast<u64>(bid_prices_.size()) && bid_prices_[i] == price_before )
+          ++i;
+      }
     }
 
+    {
+      u64 i = 0;
+      while ( i < static_cast<u64>(ask_buckets_.size()) ) {
+        const i64 price_before = ask_prices_[i];
+        apply_passive_fills_one_bucket_(rec, price_before, ask_buckets_[i], Side::Sell);
+        if ( i < static_cast<u64>(ask_prices_.size()) && ask_prices_[i] == price_before )
+          ++i;
+      }
+    }
     // ------------------------------------------------------------
     // (2) Activate newly-due orders (NOT fill-eligible until next step)
     // ------------------------------------------------------------
+    defer_bucket_erase_ = false;
+
+    // Compact empty buckets using existing erasers (preserves has_active_* / best_active_*
+    // invariants).
+    for ( u64 i = static_cast<u64>(bid_buckets_.size()); i-- > 0; ) {
+      if ( bid_buckets_[i].size == 0 && bid_buckets_[i].head == kInvalidIndex )
+        erase_bid_bucket_if_empty_(i);
+    }
+    for ( u64 i = 0; i < static_cast<u64>(ask_buckets_.size()); /*no++*/ ) {
+      if ( ask_buckets_[i].size == 0 && ask_buckets_[i].head == kInvalidIndex ) {
+        erase_ask_bucket_if_empty_(i);
+        continue; // elements shift left
+      }
+      ++i;
+    }
+
     while ( !pending_.empty() && pending_.top().activate_ts <= now_ ) {
       const PendingEntry e = pending_.top();
       pending_.pop();
@@ -107,6 +143,13 @@ namespace sim
         active_bids_.push_back(idx);
 
         const u64 bidx = get_or_insert_bid_bucket_idx_(o.price_q);
+        // If this price bucket is new/empty, seed bucket-level queue state from the
+        // activation-time snapshot to avoid re-anchoring next step (loses one tick).
+        if ( bid_buckets_[bidx].size == 0 ) {
+          bid_buckets_[bidx].visibility = o.visibility;
+          bid_buckets_[bidx].last_level_idx = o.last_level_idx;
+          bid_buckets_[bidx].last_level_qty_q = o.last_level_qty_q;
+        }
         bucket_push_back_bid_(bidx, idx);
 
         if ( !has_active_bids_ ) {
@@ -122,6 +165,12 @@ namespace sim
         active_asks_.push_back(idx);
 
         const u64 aidx = get_or_insert_ask_bucket_idx_(o.price_q);
+        // Same seeding for asks.
+        if ( ask_buckets_[aidx].size == 0 ) {
+          ask_buckets_[aidx].visibility = o.visibility;
+          ask_buckets_[aidx].last_level_idx = o.last_level_idx;
+          ask_buckets_[aidx].last_level_qty_q = o.last_level_qty_q;
+        }
         bucket_push_back_ask_(aidx, idx);
 
         if ( !has_active_asks_ ) {
@@ -143,6 +192,32 @@ namespace sim
       return false;
     events_.push_back(Event{ts, id, et, st, rr});
     return true;
+  }
+
+  void MarketSimulator::cleanup_empty_buckets_()
+  {
+    // Bids
+    for ( u64 i = 0; i < static_cast<u64>(bid_buckets_.size()); ) {
+      const Bucket& b = bid_buckets_[i];
+      if ( b.size == 0 && b.head == kInvalidIndex ) {
+        // erase price+bucket in lockstep (flat-map parallel vectors)
+        bid_prices_.erase(bid_prices_.begin() + i);
+        bid_buckets_.erase(bid_buckets_.begin() + i);
+        continue;
+      }
+      ++i;
+    }
+
+    // Asks
+    for ( u64 i = 0; i < static_cast<u64>(ask_buckets_.size()); ) {
+      const Bucket& b = ask_buckets_[i];
+      if ( b.size == 0 && b.head == kInvalidIndex ) {
+        ask_prices_.erase(ask_prices_.begin() + i);
+        ask_buckets_.erase(ask_buckets_.begin() + i);
+        continue;
+      }
+      ++i;
+    }
   }
 
 } // namespace sim

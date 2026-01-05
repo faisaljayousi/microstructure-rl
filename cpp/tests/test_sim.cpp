@@ -1,6 +1,6 @@
-#include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 
 #include "schema.hpp"
 #include "sim.hpp"
@@ -56,6 +56,12 @@ namespace
 
 int main()
 {
+#ifdef _MSC_VER
+#  include <crtdbg.h>
+  _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
+  _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
+#endif
+
   // Base params used as a template in per-test scopes.
   sim::SimulatorParams p{};
   p.max_orders = 32;
@@ -242,6 +248,8 @@ int main()
 
     // Now deplete bid@99 by 3 => Ep=3. FIFO: id1 fills 2, id2 fills 1.
     auto r2 = make_record_one_bid_level(2, 100, 10, 99, 37, 99, 10);
+    const std::size_t fills_before = ex.fills().size();
+    const sim::Ledger ledger_before = ex.ledger();
     ex.step(r2);
 
     const sim::Order& f1 = ex.orders().at(ex.orders().size() - 2);
@@ -251,6 +259,30 @@ int main()
     assert(f1.state == sim::OrderState::Filled);
     assert(f2.filled_qty_q == 1);
     assert(f2.state == sim::OrderState::Partial);
+
+    // Two passive fills should have been emitted (one per order fill), both Maker at price 99.
+    // Depending on how you batch, this may be 2 FillEvents (recommended) or 1 aggregated event.
+    // These asserts enforce the 2-event behavior.
+    assert(ex.fills().size() == fills_before + 2);
+    const sim::FillEvent& e1 = ex.fills().at(fills_before + 0);
+    const sim::FillEvent& e2 = ex.fills().at(fills_before + 1);
+    assert(e1.liq == sim::LiquidityFlag::Maker);
+    assert(e2.liq == sim::LiquidityFlag::Maker);
+    assert(e1.price_q == 99);
+    assert(e2.price_q == 99);
+    assert(e1.qty_q == 2);
+    assert(e2.qty_q == 1);
+
+    // Ledger deltas must equal sum(notional + fee) and sum(qty) based on emitted FillEvents.
+    const sim::Ledger ledger_after = ex.ledger();
+    const i64 cash_delta = ledger_after.cash_q - ledger_before.cash_q;
+    const i64 pos_delta = ledger_after.position_qty_q - ledger_before.position_qty_q;
+
+    // Buy fills: cash decreases, position increases.
+    assert(pos_delta == (e1.qty_q + e2.qty_q));
+    const i64 expected_cash_delta =
+        -(e1.notional_cash_q + e1.fee_cash_q + e2.notional_cash_q + e2.fee_cash_q);
+    assert(cash_delta == expected_cash_delta);
   }
 
   // 3) No double depletion across multiple orders at same price:
@@ -290,6 +322,49 @@ int main()
     assert(o1.id == id1 && o2.id == id2);
     assert(o1.qty_ahead_q == 30); // 40 - 10
     assert(o2.qty_ahead_q == 40); // MUST NOT also become 30 (would indicate double depletion)
+  }
+
+  // 4) Single passive fill emits FillEvent and updates ledger consistently.
+  {
+    sim::SimulatorParams p2 = p;
+    p2.max_orders = 8;
+    p2.max_events = 256;
+    p2.outbound_latency = sim::Ns{0};
+    p2.alpha_ppm = 1'000'000;
+
+    sim::MarketSimulator ex(p2);
+    sim::Ledger l{};
+    l.cash_q = 1'000'000;
+    l.position_qty_q = 1'000'000;
+    ex.reset(sim::Ns{0}, l);
+
+    auto r0 = make_record_one_bid_level(0, 100, 10, 99, 40, 99, 10);
+    ex.step(r0);
+
+    sim::LimitOrderRequest b{};
+    b.side = sim::Side::Buy;
+    b.price_q = 99;
+    b.qty_q = 2;
+    const u64 id = ex.place_limit(b);
+    ex.step(r0); // activate
+
+    // Deplete bid@99 by 2 => Ep=2 => should fill exactly 2.
+    const std::size_t fills_before = ex.fills().size();
+    const sim::Ledger ledger_before = ex.ledger();
+
+    auto r1 = make_record_one_bid_level(1, 100, 10, 99, 38, 99, 10); // 40->38 => Ep=2
+    ex.step(r1);
+
+    assert(ex.fills().size() == fills_before + 1);
+    const sim::FillEvent& fe = ex.fills().back();
+    assert(fe.order_id == id);
+    assert(fe.liq == sim::LiquidityFlag::Maker);
+    assert(fe.price_q == 99);
+    assert(fe.qty_q == 2);
+
+    const sim::Ledger ledger_after = ex.ledger();
+    assert(ledger_after.position_qty_q - ledger_before.position_qty_q == 2);
+    assert(ledger_after.cash_q - ledger_before.cash_q == -(fe.notional_cash_q + fe.fee_cash_q));
   }
 
   // ----------------------------

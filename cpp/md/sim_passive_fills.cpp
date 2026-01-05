@@ -110,6 +110,29 @@ namespace sim
     if ( b.visibility != Visibility::Visible )
       return;
 
+    // Trade-through detection (Phase 2 semantics): if crossed, queue becomes irrelevant.
+    // Must run even when there is no depletion on this tick.
+    if ( side == Side::Buy ) {
+      if ( lookup::is_valid_ask_price(best_ask) && best_ask <= bucket_price_q ) {
+        for ( u64 cur = b.head; cur != kInvalidIndex; cur = orders_[cur].bucket_next ) {
+          Order& o = orders_[cur];
+          if ( !is_resting(o.state) || o.type != OrderType::Limit )
+            continue;
+          o.qty_ahead_q = 0;
+        }
+      }
+    }
+    else {
+      if ( lookup::is_valid_bid_price(best_bid) && best_bid >= bucket_price_q ) {
+        for ( u64 cur = b.head; cur != kInvalidIndex; cur = orders_[cur].bucket_next ) {
+          Order& o = orders_[cur];
+          if ( !is_resting(o.state) || o.type != OrderType::Limit )
+            continue;
+          o.qty_ahead_q = 0;
+        }
+      }
+    }
+
     // ----------------------------
     // Bucket-level depletion
     // ----------------------------
@@ -169,11 +192,14 @@ namespace sim
         const i64 remaining = o.qty_q - o.filled_qty_q;
         if ( remaining > 0 ) {
           const i64 fill = (remaining < Ep) ? remaining : Ep;
-          o.filled_qty_q += fill;
-          Ep -= fill;
 
-          // State transition
-          o.state = (o.filled_qty_q == o.qty_q) ? OrderState::Filled : OrderState::Partial;
+          // Single source of truth for:
+          // - ledger updates
+          // - fee application
+          // - FillEvent emission
+          // - filled_qty/state transitions
+          apply_fill_(o, bucket_price_q, fill, LiquidityFlag::Maker);
+          Ep -= fill;
 
           // If fully filled: remove from active sets (also removes from bucket list)
           if ( o.state == OrderState::Filled ) {

@@ -17,6 +17,11 @@
 #  define SIM_ASSERT(x) assert(x)
 #endif
 
+#if defined(__GNUC__) || defined(__clang__)
+using i128 = __int128;
+using u128 = unsigned __int128;
+#endif
+
 namespace sim
 {
 
@@ -239,6 +244,26 @@ namespace sim
     RejectReason reject_reason{RejectReason::None};
   };
 
+  enum class LiquidityFlag : std::uint8_t
+  {
+    Maker = 0,
+    Taker = 1
+  };
+
+  struct FillEvent
+  {
+    Ns ts{0};
+    u64 order_id{0};
+    Side side{Side::Buy};
+    i64 price_q{0};
+    i64 qty_q{0};
+    LiquidityFlag liq{LiquidityFlag::Maker};
+
+    // TODO (remove later; useful for debugs)
+    i64 notional_cash_q{0};
+    i64 fee_cash_q{0};
+  };
+
   /// Simulator:
   /// - TODO: matching/fills
   class MarketSimulator final
@@ -270,6 +295,7 @@ namespace sim
     // Read-only view (for tests/debug; NOT for hot-path RL).
     const std::vector<Order>& orders() const { return orders_; }
     const std::vector<Event>& events() const { return events_; }
+    const std::vector<FillEvent>& fills() const { return fills_; }
 
   private:
     // --- Internal helpers ---
@@ -305,7 +331,6 @@ namespace sim
       }
     };
 
-  private:
     SimulatorParams params_{};
     Ns now_{0};
     Ledger ledger_{};
@@ -366,13 +391,26 @@ namespace sim
     // Lifecycle/event log. Hard capped by params_.max_events.
     std::vector<Event> events_;
 
+    // Fill log (separate from lifecycle events).
+    std::vector<FillEvent> fills_;
+
+    // Apply a single fill (updates ledger, unlocks, emits FillEvent).
+    void apply_fill_(Order& o, i64 price_q, i64 qty_q, LiquidityFlag liq);
+
     // Price-bucket helpers (log P lookup, contiguous iteration)
     u64 find_bid_bucket_idx_(i64 price_q) const;
     u64 find_ask_bucket_idx_(i64 price_q) const;
     u64 get_or_insert_bid_bucket_idx_(i64 price_q);
     u64 get_or_insert_ask_bucket_idx_(i64 price_q);
     void erase_bid_bucket_if_empty_(u64 bidx);
-    void erase_ask_bucket_if_empty_(u64 bidx);
+    void erase_ask_bucket_if_empty_(u64 aidx);
+
+    // During matching/filling we must not erase from bid/ask bucket vectors,
+    // otherwise Bucket& references become dangling.
+    bool defer_bucket_erase_{false};
+
+    // Compacts empty buckets after matching/filling when defer_bucket_erase_ is set
+    void cleanup_empty_buckets_();
 
     void bucket_push_back_bid_(u64 bidx, u64 order_idx);
     void bucket_push_back_ask_(u64 aidx, u64 order_idx);
