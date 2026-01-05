@@ -264,8 +264,7 @@ namespace sim
     i64 fee_cash_q{0};
   };
 
-  /// Simulator:
-  /// - TODO: matching/fills
+  /// Simulator
   class MarketSimulator final
   {
   public:
@@ -423,6 +422,10 @@ namespace sim
         i64 bucket_price_q,
         Bucket& bucket,
         Side side);
+
+    // Aggressive (taker) fills: marketable resting orders sweep visible top-N depth.
+    // Implemented bucket-head-driven (no O(N) scan of orders).
+    void apply_aggressive_fills_(const md::l2::Record& rec);
   };
 
 } // namespace sim

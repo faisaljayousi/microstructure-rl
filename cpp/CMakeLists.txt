@@ -86,6 +86,7 @@ add_library(sim
     md/sim_bucket_list.cpp
     md/sim_passive_fills.cpp
     md/sim_fills.cpp
+    md/sim_aggressive_fills.cpp
 )
 target_link_libraries(sim PUBLIC replay)
 target_include_directories(sim PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)

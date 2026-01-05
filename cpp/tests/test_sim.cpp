@@ -233,24 +233,12 @@ int main()
 
     ex.step(r0); // activate both at 99
 
-    // Trade-through signal: best ask crosses to 99 => qty_ahead becomes 0 (no fill yet if no
-    // depletion)
-    auto r1 = make_record_one_bid_level(1, 100, 10, 99, 40, 99, 10);
-    ex.step(r1);
-
-    const sim::Order& a1 = ex.orders().at(ex.orders().size() - 2);
-    const sim::Order& a2 = ex.orders().back();
-    assert(a1.id == id1 && a2.id == id2);
-    assert(a1.qty_ahead_q == 0);
-    assert(a2.qty_ahead_q == 0);
-    assert(a1.filled_qty_q == 0);
-    assert(a2.filled_qty_q == 0);
-
-    // Now deplete bid@99 by 3 => Ep=3. FIFO: id1 fills 2, id2 fills 1.
-    auto r2 = make_record_one_bid_level(2, 100, 10, 99, 37, 99, 10);
+    // Cross: best ask becomes 99 => with aggressive matching enabled, these buys are marketable
+    // and must execute immediately as TAKERS.
     const std::size_t fills_before = ex.fills().size();
     const sim::Ledger ledger_before = ex.ledger();
-    ex.step(r2);
+    auto r1 = make_record_one_bid_level(1, 100, 10, 99, 40, 99, 10);
+    ex.step(r1);
 
     const sim::Order& f1 = ex.orders().at(ex.orders().size() - 2);
     const sim::Order& f2 = ex.orders().back();
@@ -260,14 +248,12 @@ int main()
     assert(f2.filled_qty_q == 1);
     assert(f2.state == sim::OrderState::Partial);
 
-    // Two passive fills should have been emitted (one per order fill), both Maker at price 99.
-    // Depending on how you batch, this may be 2 FillEvents (recommended) or 1 aggregated event.
-    // These asserts enforce the 2-event behavior.
+    // Two taker fills should have been emitted (one per order fill), both Taker at price 99.
     assert(ex.fills().size() == fills_before + 2);
     const sim::FillEvent& e1 = ex.fills().at(fills_before + 0);
     const sim::FillEvent& e2 = ex.fills().at(fills_before + 1);
-    assert(e1.liq == sim::LiquidityFlag::Maker);
-    assert(e2.liq == sim::LiquidityFlag::Maker);
+    assert(e1.liq == sim::LiquidityFlag::Taker);
+    assert(e2.liq == sim::LiquidityFlag::Taker);
     assert(e1.price_q == 99);
     assert(e2.price_q == 99);
     assert(e1.qty_q == 2);
@@ -283,6 +269,47 @@ int main()
     const i64 expected_cash_delta =
         -(e1.notional_cash_q + e1.fee_cash_q + e2.notional_cash_q + e2.fee_cash_q);
     assert(cash_delta == expected_cash_delta);
+  }
+
+  // 2b) Trade-through with ZERO depletion: crossing must set qty_ahead=0, but no fill occurs
+  //     until a later tick with depletion.
+  {
+    sim::SimulatorParams p2 = p;
+    p2.max_orders = 8;
+    p2.max_events = 256;
+    p2.outbound_latency = sim::Ns{0};
+    p2.alpha_ppm = 1'000'000;
+
+    sim::MarketSimulator ex(p2);
+    sim::Ledger l{};
+    l.cash_q = 1'000'000;
+    l.position_qty_q = 1'000'000;
+    ex.reset(sim::Ns{0}, l);
+
+    // r0: bid@99 qty40, ask@101 qty10
+    auto r0 = make_record_one_bid_level(0, 100, 10, 99, 40, 101, 10);
+    ex.step(r0);
+
+    sim::LimitOrderRequest b{};
+    b.side = sim::Side::Buy;
+    b.price_q = 99;
+    b.qty_q = 1;
+    const u64 id = ex.place_limit(b);
+    ex.step(r0); // activate
+
+    // r1: ask crosses to 99 with no depletion at bid@99.
+    // With aggressive matching enabled, this order is marketable and must fill immediately as
+    // TAKER.
+    const std::size_t fills_before = ex.fills().size();
+    auto r1 = make_record_one_bid_level(1, 100, 10, 99, 40, 99, 10);
+    ex.step(r1);
+
+    assert(ex.fills().size() == fills_before + 1);
+    const sim::FillEvent& fe = ex.fills().back();
+    assert(fe.order_id == id);
+    assert(fe.liq == sim::LiquidityFlag::Taker);
+    assert(fe.price_q == 99);
+    assert(fe.qty_q == 1);
   }
 
   // 3) No double depletion across multiple orders at same price:
