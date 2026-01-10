@@ -1,0 +1,12 @@
+option(MSRL_PYTHON_WHEEL "Build Python wheel (only core libs + extension)" OFF)
+option(MSRL_BUILD_TOOLS  "Build auxiliary tools (converter, etc.)" ON)
+option(MSRL_BUILD_BENCH  "Build benchmarks" ON)
+option(MSRL_BUILD_TESTS  "Build tests" ON)
+option(MSRL_BUILD_PYTHON "Build Python bindings" ON)
+
+if (MSRL_PYTHON_WHEEL)
+  set(MSRL_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+  set(MSRL_BUILD_BENCH OFF CACHE BOOL "" FORCE)
+  set(MSRL_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+  set(MSRL_BUILD_PYTHON ON CACHE BOOL "" FORCE)
+endif()
