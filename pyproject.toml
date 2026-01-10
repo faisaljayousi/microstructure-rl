@@ -1,0 +1,19 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "nanobind>=2.0"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "microstructure-rl"
+version = "0.3.1"
+description = "Deterministic microstructure execution simulator (C++/Python)"
+requires-python = ">=3.10"
+
+[tool.scikit-build]
+wheel.packages = ["python/microstructure_rl"]
+cmake.source-dir = "cpp"
+cmake.build-type = "Release"
+cmake.verbose = true
+
+[tool.scikit-build.cmake.define]
+MSRL_PYTHON_WHEEL = "ON"
+VCPKG_TARGET_TRIPLET = "x64-windows"
